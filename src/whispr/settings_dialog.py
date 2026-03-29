@@ -52,6 +52,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_transcription_tab(), "Transcription")
         tabs.addTab(self._build_audio_tab(), "Audio")
         tabs.addTab(self._build_postprocessing_tab(), "Post-Processing")
+        tabs.addTab(self._build_features_tab(), "Features")
         tabs.addTab(self._build_hotkey_tab(), "Hotkey")
         tabs.addTab(self._build_llm_tab(), "LLM Cleanup")
         layout.addWidget(tabs)
@@ -229,6 +230,46 @@ class SettingsDialog(QDialog):
 
         return widget
 
+    def _build_features_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        features = self._config.get("features", {})
+
+        self._feat_audio_feedback = QCheckBox("Audio feedback (beep on record start/stop)")
+        self._feat_audio_feedback.setChecked(features.get("audio_feedback", True))
+        layout.addWidget(self._feat_audio_feedback)
+
+        self._feat_preview = QCheckBox("Preview overlay (review/edit text before injection)")
+        self._feat_preview.setChecked(features.get("preview_overlay", False))
+        layout.addWidget(self._feat_preview)
+
+        self._feat_continuous = QCheckBox("Continuous mode (always-on VAD listening, no hotkey needed)")
+        self._feat_continuous.setChecked(features.get("continuous_mode", False))
+        layout.addWidget(self._feat_continuous)
+
+        self._feat_streaming = QCheckBox("Streaming transcription (show partial results while processing)")
+        self._feat_streaming.setChecked(features.get("streaming_transcription", False))
+        layout.addWidget(self._feat_streaming)
+
+        layout.addSpacing(12)
+
+        notes = QLabel(
+            "Audio feedback: short beep when recording starts/stops.\n\n"
+            "Preview overlay: floating window shows text before injection.\n"
+            "Press Enter to inject, Esc to discard, or edit the text.\n\n"
+            "Continuous mode: listens continuously using voice activity\n"
+            "detection. No need to hold a hotkey — just speak.\n\n"
+            "Streaming: shows partial transcription results as segments\n"
+            "complete, instead of waiting for the full result."
+        )
+        notes.setWordWrap(True)
+        notes.setStyleSheet("color: #777; font-size: 11px;")
+        layout.addWidget(notes)
+
+        layout.addStretch()
+        return widget
+
     def _build_llm_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -293,6 +334,12 @@ class SettingsDialog(QDialog):
 
         self._config["llm"]["model"] = self._llm_model.text().strip()
         self._config["llm"]["endpoint"] = self._llm_endpoint.text().strip()
+
+        self._config.setdefault("features", {})
+        self._config["features"]["audio_feedback"] = self._feat_audio_feedback.isChecked()
+        self._config["features"]["preview_overlay"] = self._feat_preview.isChecked()
+        self._config["features"]["continuous_mode"] = self._feat_continuous.isChecked()
+        self._config["features"]["streaming_transcription"] = self._feat_streaming.isChecked()
 
         self.settings_changed.emit(self._config)
         self.accept()

@@ -195,6 +195,12 @@ def _empty_config() -> dict:
         "vocabulary_profile": "medical",
         "injection_method": "auto",
         "clipboard_threshold_chars": 500,
+        "features": {
+            "audio_feedback": True,
+            "preview_overlay": False,
+            "continuous_mode": False,
+            "streaming_transcription": False,
+        },
     }
 
 

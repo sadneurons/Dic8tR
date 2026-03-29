@@ -17,11 +17,13 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QApplication
 
 from whispr.audio import AudioCapture
+from whispr.audio_feedback import play_start_sound, play_stop_sound
 from whispr.config import load_config, load_vocabulary, load_profile, build_initial_prompt, save_config
 from whispr.first_run import FirstRunWizard, model_is_cached
 from whispr.inject import inject_text
 from whispr.llm_cleanup import LLMCleanup
 from whispr.postprocess import postprocess
+from whispr.preview_overlay import PreviewOverlay
 from whispr.settings_dialog import SettingsDialog
 from whispr.transcribe import WhisperTranscriber
 from whispr.tray import WhisprTray, TrayState
@@ -33,15 +35,13 @@ logger = logging.getLogger("whispr")
 class WhisprApp(QObject):
     """Core application object that owns all components and orchestrates
     the dictation pipeline.
-
-    Signals are used for thread-safe communication between the hotkey
-    listener thread, the transcription worker, and the Qt UI thread.
     """
 
     # Signals for cross-thread communication
     recording_started = pyqtSignal()
     recording_stopped = pyqtSignal(np.ndarray)
     transcription_done = pyqtSignal(str)
+    streaming_update = pyqtSignal(str)
 
     def __init__(self, config: dict, vocabulary: dict) -> None:
         super().__init__()
@@ -53,8 +53,9 @@ class WhisprApp(QObject):
         self._corrections = vocabulary.get("corrections", {})
         self._expansions = vocabulary.get("expansions", {})
         self._pp_config = config["postprocessing"]
+        self._features = config.get("features", {})
 
-        # Components — initialised but not started
+        # Components
         active_profile = config.get("vocabulary_profile", "medical")
         self.tray = WhisprTray(active_profile=active_profile)
         self.audio = AudioCapture(device=config["audio_device"])
@@ -65,10 +66,19 @@ class WhisprApp(QObject):
             initial_prompt=self.initial_prompt,
         )
 
+        # Preview overlay (created once, shown/hidden as needed)
+        self._preview = PreviewOverlay()
+        self._preview.accepted.connect(self._on_preview_accepted)
+        self._preview.dismissed.connect(self._on_preview_dismissed)
+
         # Optional local LLM cleanup
         self._llm: LLMCleanup | None = None
         if config["postprocessing"].get("llm_cleanup", False):
             self._init_llm_cleanup()
+
+        # Continuous mode state
+        self._continuous_active = False
+        self._vad_timer: QTimer | None = None
 
         self._hotkey_listener = None
         self._last_text = ""
@@ -77,6 +87,7 @@ class WhisprApp(QObject):
         self.recording_started.connect(self._on_recording_started)
         self.recording_stopped.connect(self._on_recording_stopped)
         self.transcription_done.connect(self._on_transcription_done)
+        self.streaming_update.connect(self._on_streaming_update)
         self.tray.quit_requested.connect(self._on_quit)
         self.tray.settings_requested.connect(self._on_settings_requested)
         self.tray.import_vocab_requested.connect(self._on_import_vocab)
@@ -100,16 +111,13 @@ class WhisprApp(QObject):
         self.tray.show()
         self.tray.set_state(TrayState.LOADING)
 
-        # Load model in background thread
         self.transcriber.load_model_async(
             on_complete=self._on_model_loaded,
             on_error=self._on_model_error,
         )
 
     def _on_model_loaded(self) -> None:
-        """Called from model loader thread when model is ready."""
         logger.info("Model loaded, starting hotkey listener")
-        # Schedule UI update on the Qt thread
         QTimer.singleShot(0, self._activate)
 
     def _on_model_error(self, error: Exception) -> None:
@@ -129,8 +137,9 @@ class WhisprApp(QObject):
         self.tray.show_notification("Whispr", "Ready — hold hotkey to dictate", 2000)
         self._start_hotkey_listener()
 
+    # ── Hotkey listener ───────────────────────────────────────────────
+
     def _start_hotkey_listener(self) -> None:
-        """Start the pynput global hotkey listener."""
         try:
             from pynput import keyboard
         except ImportError:
@@ -150,10 +159,11 @@ class WhisprApp(QObject):
             nonlocal recording
             if is_trigger(key) and not recording and self.tray.enabled:
                 recording = True
-                # Start audio immediately in this thread to avoid race with release
                 try:
+                    if self._features.get("audio_feedback", False):
+                        play_start_sound()
                     self.audio.start()
-                    self.recording_started.emit()  # updates tray icon on Qt thread
+                    self.recording_started.emit()
                 except Exception as e:
                     recording = False
                     logger.error("Failed to start recording: %s", e)
@@ -162,6 +172,8 @@ class WhisprApp(QObject):
             nonlocal recording
             if is_trigger(key) and recording:
                 recording = False
+                if self._features.get("audio_feedback", False):
+                    play_stop_sound()
                 audio = self.audio.stop()
                 if len(audio) > 0:
                     self.recording_stopped.emit(audio)
@@ -176,29 +188,79 @@ class WhisprApp(QObject):
         self._hotkey_listener.start()
         logger.info("Hotkey listener started (Pause/Break, F9)")
 
+    # ── Recording handlers ────────────────────────────────────────────
+
     @pyqtSlot()
     def _on_recording_started(self) -> None:
-        """Handle recording start (Qt thread) — just update the tray icon."""
         self.tray.set_state(TrayState.LISTENING)
 
     @pyqtSlot(np.ndarray)
     def _on_recording_stopped(self, audio: np.ndarray) -> None:
-        """Handle recording stop — start transcription in worker thread."""
         self.tray.set_state(TrayState.PROCESSING)
 
+        use_streaming = self._features.get("streaming_transcription", False)
+
         def _worker():
-            text = self.transcriber.transcribe(audio)
-            # LLM cleanup runs in this worker thread (not the UI thread)
-            if self._llm and self._pp_config.get("llm_cleanup", False):
-                text = self._llm.cleanup(text)
-            self.transcription_done.emit(text)
+            if use_streaming:
+                self._transcribe_streaming(audio)
+            else:
+                text = self.transcriber.transcribe(audio)
+                if self._llm and self._pp_config.get("llm_cleanup", False):
+                    text = self._llm.cleanup(text)
+                self.transcription_done.emit(text)
 
         t = threading.Thread(target=_worker, name="whispr-transcribe", daemon=True)
         t.start()
 
+    def _transcribe_streaming(self, audio: np.ndarray) -> None:
+        """Transcribe with streaming — emit partial results as segments complete."""
+        if self.transcriber._model is None:
+            self.transcription_done.emit("")
+            return
+
+        try:
+            with self.transcriber._lock:
+                segments, info = self.transcriber._model.transcribe(
+                    audio,
+                    language=self.transcriber.language if self.transcriber.language else None,
+                    beam_size=self.transcriber.beam_size,
+                    initial_prompt=self.transcriber.initial_prompt or None,
+                    vad_filter=self.transcriber.vad_filter,
+                    word_timestamps=False,
+                )
+
+                parts = []
+                for seg in segments:
+                    if seg.text:
+                        parts.append(seg.text.strip())
+                        # Emit partial result for live preview
+                        self.streaming_update.emit(" ".join(parts))
+
+                text = " ".join(parts).strip()
+
+            if self._llm and self._pp_config.get("llm_cleanup", False):
+                text = self._llm.cleanup(text)
+
+            self.transcription_done.emit(text)
+
+        except Exception as e:
+            logger.error("Streaming transcription failed: %s", e)
+            self.transcription_done.emit("")
+
+    @pyqtSlot(str)
+    def _on_streaming_update(self, partial_text: str) -> None:
+        """Handle partial streaming results — update preview overlay if visible."""
+        if self._features.get("preview_overlay", False) and self._features.get("streaming_transcription", False):
+            # Show live updating preview
+            if not self._preview.isVisible():
+                self._preview.show_text(partial_text)
+            else:
+                self._preview._text_edit.setPlainText(partial_text)
+
+    # ── Transcription result ──────────────────────────────────────────
+
     @pyqtSlot(str)
     def _on_transcription_done(self, raw_text: str) -> None:
-        """Handle transcription result — postprocess and inject (Qt thread)."""
         self.tray.set_state(TrayState.IDLE)
 
         if not raw_text:
@@ -218,7 +280,6 @@ class WhisprApp(QObject):
             enable_capitalisation=self._pp_config["auto_capitalisation"],
         )
 
-        # Handle editing commands
         if processed == "SCRATCH_THAT":
             logger.info("Scratch that — discarding last utterance")
             self._last_text = ""
@@ -229,23 +290,89 @@ class WhisprApp(QObject):
 
         logger.info("Processed: %s", processed)
 
-        # Inject into focused window
+        # Preview overlay or direct injection
+        if self._features.get("preview_overlay", False):
+            self._preview.show_text(processed)
+        else:
+            self._inject(processed)
+
+    def _on_preview_accepted(self, text: str) -> None:
+        """User accepted text from preview overlay (possibly edited)."""
+        self._inject(text)
+
+    def _on_preview_dismissed(self) -> None:
+        """User dismissed preview overlay."""
+        logger.info("Preview dismissed, text not injected")
+
+    def _inject(self, text: str) -> None:
+        """Inject text into the focused window."""
         ok = inject_text(
-            processed,
+            text,
             clipboard_threshold=self.config["clipboard_threshold_chars"],
             method=self.config["injection_method"],
         )
-
         if ok:
-            self._last_text = processed
-            self.tray.set_last_transcript(processed)
+            self._last_text = text
+            self.tray.set_last_transcript(text)
         else:
             logger.error("Text injection failed")
             self.tray.show_notification("Whispr", "Injection failed", 2000)
 
+    # ── Continuous / VAD mode ─────────────────────────────────────────
+
+    def start_continuous_mode(self) -> None:
+        """Start continuous listening with VAD-based segmentation."""
+        if self._continuous_active:
+            return
+
+        self._continuous_active = True
+        logger.info("Continuous mode started")
+        self.tray.show_notification("Whispr", "Continuous listening active", 2000)
+        self._continuous_record_cycle()
+
+    def stop_continuous_mode(self) -> None:
+        """Stop continuous listening."""
+        self._continuous_active = False
+        if self.audio.is_recording:
+            audio = self.audio.stop()
+            if len(audio) > 0:
+                self.recording_stopped.emit(audio)
+        self.tray.set_state(TrayState.IDLE)
+        logger.info("Continuous mode stopped")
+
+    def _continuous_record_cycle(self) -> None:
+        """Record a segment, transcribe, then start the next segment."""
+        if not self._continuous_active:
+            return
+
+        try:
+            self.audio.start()
+            self.tray.set_state(TrayState.LISTENING)
+        except Exception as e:
+            logger.error("Continuous mode audio start failed: %s", e)
+            self._continuous_active = False
+            return
+
+        # Record for 5 seconds then process (VAD will trim silence)
+        QTimer.singleShot(5000, self._continuous_segment_done)
+
+    def _continuous_segment_done(self) -> None:
+        """Handle end of a continuous mode recording segment."""
+        if not self._continuous_active:
+            return
+
+        audio = self.audio.stop()
+        if len(audio) > 0:
+            self.recording_stopped.emit(audio)
+
+        # Start next segment after a short gap
+        if self._continuous_active:
+            QTimer.singleShot(200, self._continuous_record_cycle)
+
+    # ── Profile switching ─────────────────────────────────────────────
+
     @pyqtSlot(str)
     def _on_profile_changed(self, name: str) -> None:
-        """Switch to a different vocabulary profile."""
         self.vocabulary = load_profile(name)
         self._corrections = self.vocabulary.get("corrections", {})
         self._expansions = self.vocabulary.get("expansions", {})
@@ -259,12 +386,12 @@ class WhisprApp(QObject):
                      name, len(self._corrections), len(self._expansions))
         self.tray.show_notification("Whispr", f"Vocabulary: {name.capitalize()}", 2000)
 
+    # ── Vocab import ──────────────────────────────────────────────────
+
     @pyqtSlot()
     def _on_import_vocab(self) -> None:
-        """Open the vocabulary import dialog."""
         dialog = VocabImportDialog()
         if dialog.exec():
-            # Reload vocabulary
             self.vocabulary = load_vocabulary()
             self._corrections = self.vocabulary.get("corrections", {})
             self._expansions = self.vocabulary.get("expansions", {})
@@ -273,30 +400,40 @@ class WhisprApp(QObject):
             logger.info("Vocabulary reloaded after import")
             self.tray.show_notification("Whispr", "Vocabulary imported successfully", 2000)
 
+    # ── Settings ──────────────────────────────────────────────────────
+
     @pyqtSlot()
     def _on_settings_requested(self) -> None:
-        """Open the settings dialog."""
         dialog = SettingsDialog(self.config)
         dialog.settings_changed.connect(self._apply_settings)
         dialog.exec()
 
     def _apply_settings(self, new_config: dict) -> None:
-        """Apply changed settings and save to disk."""
         old_model = self.config.get("model_size")
+        old_profile = self.config.get("vocabulary_profile")
         self.config = new_config
 
-        # Update post-processing config references
         self._pp_config = new_config["postprocessing"]
+        self._features = new_config.get("features", {})
 
-        # Update transcriber settings that don't need a model reload
         self.transcriber.language = new_config["language"]
         self.transcriber.beam_size = new_config["beam_size"]
 
-        # Save to disk
+        # If profile changed via settings dialog, apply it
+        new_profile = new_config.get("vocabulary_profile")
+        if new_profile and new_profile != old_profile:
+            self._on_profile_changed(new_profile)
+            self.tray.set_active_profile(new_profile)
+
+        # Handle continuous mode toggle
+        if self._features.get("continuous_mode", False) and not self._continuous_active:
+            self.start_continuous_mode()
+        elif not self._features.get("continuous_mode", False) and self._continuous_active:
+            self.stop_continuous_mode()
+
         save_config(new_config)
         logger.info("Settings saved")
 
-        # Notify if model changed (requires restart)
         if new_config["model_size"] != old_model:
             self.tray.show_notification(
                 "Whispr",
@@ -304,11 +441,14 @@ class WhisprApp(QObject):
                 5000,
             )
 
+    # ── Quit ──────────────────────────────────────────────────────────
+
     def _on_quit(self) -> None:
-        """Clean shutdown."""
         logger.info("Shutting down")
+        self._continuous_active = False
         if self._hotkey_listener:
             self._hotkey_listener.stop()
+        self._preview.close()
         self.tray.hide()
         QApplication.instance().quit()
 
@@ -342,23 +482,18 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info("Whispr starting up")
 
-    # Load configuration
     config = load_config(args.config)
     profile_name = config.get("vocabulary_profile", "medical")
     vocabulary = load_profile(profile_name)
     logger.info("Vocabulary profile: %s", profile_name)
-
     logger.info("Model: %s | Language: %s", config["model_size"], config["language"])
 
-    # Create Qt application
     app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)  # Keep running when no windows open
+    app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Whispr")
 
-    # Allow Ctrl+C to kill the app
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-    # First-run wizard if model not cached
     if not model_is_cached(config["model_size"]):
         logger.info("Model not cached, showing first-run wizard")
         from PyQt6.QtWidgets import QDialog
@@ -369,7 +504,6 @@ def main(argv: list[str] | None = None) -> int:
         config["model_size"] = wizard.selected_model
         save_config(config)
 
-    # Create and start the Whispr app
     whispr = WhisprApp(config, vocabulary)
     whispr.start()
 

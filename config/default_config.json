@@ -20,5 +20,11 @@
   },
   "vocabulary_profile": "medical",
   "injection_method": "auto",
-  "clipboard_threshold_chars": 500
+  "clipboard_threshold_chars": 500,
+  "features": {
+    "audio_feedback": true,
+    "preview_overlay": false,
+    "continuous_mode": false,
+    "streaming_transcription": false
+  }
 }
