@@ -10,6 +10,7 @@ import logging
 import signal
 import sys
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +21,7 @@ from whispr.audio import AudioCapture
 from whispr.audio_feedback import play_start_sound, play_stop_sound
 from whispr.config import load_config, load_vocabulary, load_profile, build_initial_prompt, save_config
 from whispr.first_run import FirstRunWizard, model_is_cached
-from whispr.inject import inject_text
+from whispr.inject import inject_text, send_undo, send_redo, send_key_combo, send_delete_word
 from whispr.llm_cleanup import LLMCleanup
 from whispr.postprocess import postprocess
 from whispr.preview_overlay import PreviewOverlay
@@ -52,6 +53,7 @@ class WhisprApp(QObject):
 
         self._corrections = vocabulary.get("corrections", {})
         self._expansions = vocabulary.get("expansions", {})
+        self._custom_commands = vocabulary.get("commands", {})
         self._pp_config = config["postprocessing"]
         self._features = config.get("features", {})
 
@@ -273,6 +275,7 @@ class WhisprApp(QObject):
             raw_text,
             corrections=self._corrections,
             expansions=self._expansions,
+            custom_commands=self._custom_commands,
             enable_punctuation=self._pp_config["punctuation_commands"],
             enable_editing=self._pp_config["editing_commands"],
             enable_corrections=self._pp_config["vocabulary_corrections"],
@@ -280,21 +283,65 @@ class WhisprApp(QObject):
             enable_capitalisation=self._pp_config["auto_capitalisation"],
         )
 
-        if processed == "SCRATCH_THAT":
-            logger.info("Scratch that — discarding last utterance")
-            self._last_text = ""
-            return
-        if processed == "SCRATCH_WORD":
-            logger.info("Scratch word — not yet implemented for injection")
+        # Handle action commands
+        if processed.startswith("ACTION:"):
+            self._handle_action(processed)
             return
 
         logger.info("Processed: %s", processed)
 
-        # Preview overlay or direct injection
         if self._features.get("preview_overlay", False):
             self._preview.show_text(processed)
         else:
             self._inject(processed)
+
+    def _handle_action(self, action: str) -> None:
+        """Execute an action command returned by postprocess."""
+        method = self.config["injection_method"]
+
+        if action == "ACTION:SCRATCH_THAT":
+            # Undo the last injection by sending Ctrl+Z
+            if self._last_text:
+                # Estimate number of undos needed (one per character for xdotool type,
+                # or one for clipboard paste). Send a single Ctrl+Z which undoes
+                # the last atomic operation in most editors.
+                send_undo(method=method)
+                logger.info("Scratch that — sent undo")
+                self._last_text = ""
+            else:
+                logger.info("Scratch that — nothing to undo")
+
+        elif action == "ACTION:SCRATCH_WORD":
+            send_delete_word(method=method)
+            logger.info("Scratch word — sent Ctrl+Backspace")
+
+        elif action == "ACTION:UNDO":
+            send_undo(method=method)
+            logger.info("Undo")
+
+        elif action == "ACTION:REDO":
+            send_redo(method=method)
+            logger.info("Redo")
+
+        elif action.startswith("ACTION:KEY:"):
+            # Key combo(s) — may be comma-separated for sequences
+            combos = action[len("ACTION:KEY:"):].split(",")
+            for combo in combos:
+                send_key_combo(combo.strip(), method=method)
+                time.sleep(0.02)
+            logger.info("Key combo: %s", action[len("ACTION:KEY:"):])
+
+        elif action.startswith("ACTION:INSERT:"):
+            # Insert literal text (used by custom commands)
+            text = action[len("ACTION:INSERT:"):]
+            # Expand placeholders
+            from datetime import date
+            text = text.replace("{{DATE}}", date.today().strftime("%d/%m/%Y"))
+            text = text.replace("{{DATE_LONG}}", date.today().strftime("%d %B %Y"))
+            self._inject(text)
+
+        else:
+            logger.warning("Unknown action: %s", action)
 
     def _on_preview_accepted(self, text: str) -> None:
         """User accepted text from preview overlay (possibly edited)."""
@@ -376,6 +423,7 @@ class WhisprApp(QObject):
         self.vocabulary = load_profile(name)
         self._corrections = self.vocabulary.get("corrections", {})
         self._expansions = self.vocabulary.get("expansions", {})
+        self._custom_commands = self.vocabulary.get("commands", {})
         self.initial_prompt = build_initial_prompt(self.vocabulary)
         self.transcriber.initial_prompt = self.initial_prompt
 
@@ -395,6 +443,7 @@ class WhisprApp(QObject):
             self.vocabulary = load_vocabulary()
             self._corrections = self.vocabulary.get("corrections", {})
             self._expansions = self.vocabulary.get("expansions", {})
+            self._custom_commands = self.vocabulary.get("commands", {})
             self.initial_prompt = build_initial_prompt(self.vocabulary)
             self.transcriber.initial_prompt = self.initial_prompt
             logger.info("Vocabulary reloaded after import")

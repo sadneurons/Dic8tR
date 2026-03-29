@@ -131,5 +131,15 @@
     "Activities of daily living. Geriatric Depression Scale.",
     "Lecanemab. Donanemab. Anti-amyloid therapy.",
     "Neurofibrillary tangles. Amyloid plaques. Tau pathology."
-  ]
+  ],
+  "commands": {
+    "insert date": "ACTION:INSERT:{{DATE}}",
+    "sign off": "ACTION:INSERT:\n\nYours sincerely,\n\nDr ",
+    "heading one": "ACTION:KEY:ctrl+1",
+    "heading two": "ACTION:KEY:ctrl+2",
+    "heading three": "ACTION:KEY:ctrl+3",
+    "find and replace": "ACTION:KEY:ctrl+h",
+    "zoom in": "ACTION:KEY:ctrl+plus",
+    "zoom out": "ACTION:KEY:ctrl+minus"
+  }
 }

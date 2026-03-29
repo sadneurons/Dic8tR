@@ -107,14 +107,16 @@ class AudioCapture:
 
         self._recording = False
 
-        if self._stream is not None:
+        stream = self._stream
+        self._stream = None
+        if stream is not None:
             try:
-                self._stream.stop()
-                self._stream.close()
+                # abort() stops immediately and waits for the callback to finish,
+                # avoiding double-free when the callback races with close()
+                stream.abort()
+                stream.close()
             except Exception as e:
                 logger.warning("Error closing audio stream: %s", e)
-            finally:
-                self._stream = None
 
         with self._lock:
             if not self._chunks:
@@ -149,6 +151,8 @@ class AudioCapture:
         status: sd.CallbackFlags,
     ) -> None:
         """sounddevice callback — accumulate audio chunks."""
+        if not self._recording:
+            return
         if status:
             logger.warning("Audio callback status: %s", status)
         with self._lock:

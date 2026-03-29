@@ -104,13 +104,13 @@ class TestPunctuationCommands:
 
 class TestEditingCommands:
     def test_scratch_that(self):
-        assert postprocess("scratch that") == "SCRATCH_THAT"
+        assert postprocess("scratch that") == "ACTION:SCRATCH_THAT"
 
     def test_scratch_that_with_period(self):
-        assert postprocess("Scratch that.") == "SCRATCH_THAT"
+        assert postprocess("Scratch that.") == "ACTION:SCRATCH_THAT"
 
     def test_scratch_word(self):
-        assert postprocess("scratch word") == "SCRATCH_WORD"
+        assert postprocess("scratch word") == "ACTION:SCRATCH_WORD"
 
     def test_scratch_not_triggered_in_sentence(self):
         result = postprocess("I want to scratch that idea", enable_capitalisation=False)
