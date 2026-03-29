@@ -7,16 +7,20 @@ name = "whispr"
 version = "0.1.0"
 description = "Local-only Linux dictation system tray application using faster-whisper"
 requires-python = ">=3.11"
+license = {text = "MIT"}
 dependencies = [
     "faster-whisper>=1.0.0",
     "sounddevice>=0.4.6",
     "numpy>=1.24",
     "PyQt6>=6.5",
     "pynput>=1.7.6",
+    "huggingface-hub>=0.20.0",
 ]
 
 [project.optional-dependencies]
 llm = ["ollama>=0.2.0"]
+import = ["openpyxl>=3.1.0"]
+all = ["ollama>=0.2.0", "openpyxl>=3.1.0"]
 dev = ["pytest>=7.0", "pytest-qt>=4.2"]
 
 [project.scripts]

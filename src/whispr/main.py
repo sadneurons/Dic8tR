@@ -17,13 +17,15 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QApplication
 
 from whispr.audio import AudioCapture
-from whispr.config import load_config, load_vocabulary, build_initial_prompt, save_config
+from whispr.config import load_config, load_vocabulary, load_profile, build_initial_prompt, save_config
+from whispr.first_run import FirstRunWizard, model_is_cached
 from whispr.inject import inject_text
 from whispr.llm_cleanup import LLMCleanup
 from whispr.postprocess import postprocess
 from whispr.settings_dialog import SettingsDialog
 from whispr.transcribe import WhisperTranscriber
 from whispr.tray import WhisprTray, TrayState
+from whispr.vocab_import import VocabImportDialog
 
 logger = logging.getLogger("whispr")
 
@@ -53,7 +55,8 @@ class WhisprApp(QObject):
         self._pp_config = config["postprocessing"]
 
         # Components — initialised but not started
-        self.tray = WhisprTray()
+        active_profile = config.get("vocabulary_profile", "medical")
+        self.tray = WhisprTray(active_profile=active_profile)
         self.audio = AudioCapture(device=config["audio_device"])
         self.transcriber = WhisperTranscriber(
             model_size=config["model_size"],
@@ -76,6 +79,8 @@ class WhisprApp(QObject):
         self.transcription_done.connect(self._on_transcription_done)
         self.tray.quit_requested.connect(self._on_quit)
         self.tray.settings_requested.connect(self._on_settings_requested)
+        self.tray.import_vocab_requested.connect(self._on_import_vocab)
+        self.tray.profile_changed.connect(self._on_profile_changed)
 
     def _init_llm_cleanup(self) -> None:
         """Initialise the local LLM cleanup module if enabled."""
@@ -145,7 +150,13 @@ class WhisprApp(QObject):
             nonlocal recording
             if is_trigger(key) and not recording and self.tray.enabled:
                 recording = True
-                self.recording_started.emit()
+                # Start audio immediately in this thread to avoid race with release
+                try:
+                    self.audio.start()
+                    self.recording_started.emit()  # updates tray icon on Qt thread
+                except Exception as e:
+                    recording = False
+                    logger.error("Failed to start recording: %s", e)
 
         def on_release(key):
             nonlocal recording
@@ -155,7 +166,6 @@ class WhisprApp(QObject):
                 if len(audio) > 0:
                     self.recording_stopped.emit(audio)
                 else:
-                    # No audio — go back to idle
                     QTimer.singleShot(0, lambda: self.tray.set_state(TrayState.IDLE))
 
         self._hotkey_listener = keyboard.Listener(
@@ -168,14 +178,8 @@ class WhisprApp(QObject):
 
     @pyqtSlot()
     def _on_recording_started(self) -> None:
-        """Handle recording start (Qt thread)."""
+        """Handle recording start (Qt thread) — just update the tray icon."""
         self.tray.set_state(TrayState.LISTENING)
-        try:
-            self.audio.start()
-        except Exception as e:
-            logger.error("Failed to start recording: %s", e)
-            self.tray.set_state(TrayState.IDLE)
-            self.tray.show_notification("Whispr", f"Recording failed: {e}", 3000)
 
     @pyqtSlot(np.ndarray)
     def _on_recording_stopped(self, audio: np.ndarray) -> None:
@@ -238,6 +242,36 @@ class WhisprApp(QObject):
         else:
             logger.error("Text injection failed")
             self.tray.show_notification("Whispr", "Injection failed", 2000)
+
+    @pyqtSlot(str)
+    def _on_profile_changed(self, name: str) -> None:
+        """Switch to a different vocabulary profile."""
+        self.vocabulary = load_profile(name)
+        self._corrections = self.vocabulary.get("corrections", {})
+        self._expansions = self.vocabulary.get("expansions", {})
+        self.initial_prompt = build_initial_prompt(self.vocabulary)
+        self.transcriber.initial_prompt = self.initial_prompt
+
+        self.config["vocabulary_profile"] = name
+        save_config(self.config)
+
+        logger.info("Switched to profile: %s (%d corrections, %d expansions)",
+                     name, len(self._corrections), len(self._expansions))
+        self.tray.show_notification("Whispr", f"Vocabulary: {name.capitalize()}", 2000)
+
+    @pyqtSlot()
+    def _on_import_vocab(self) -> None:
+        """Open the vocabulary import dialog."""
+        dialog = VocabImportDialog()
+        if dialog.exec():
+            # Reload vocabulary
+            self.vocabulary = load_vocabulary()
+            self._corrections = self.vocabulary.get("corrections", {})
+            self._expansions = self.vocabulary.get("expansions", {})
+            self.initial_prompt = build_initial_prompt(self.vocabulary)
+            self.transcriber.initial_prompt = self.initial_prompt
+            logger.info("Vocabulary reloaded after import")
+            self.tray.show_notification("Whispr", "Vocabulary imported successfully", 2000)
 
     @pyqtSlot()
     def _on_settings_requested(self) -> None:
@@ -310,7 +344,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # Load configuration
     config = load_config(args.config)
-    vocabulary = load_vocabulary()
+    profile_name = config.get("vocabulary_profile", "medical")
+    vocabulary = load_profile(profile_name)
+    logger.info("Vocabulary profile: %s", profile_name)
 
     logger.info("Model: %s | Language: %s", config["model_size"], config["language"])
 
@@ -321,6 +357,17 @@ def main(argv: list[str] | None = None) -> int:
 
     # Allow Ctrl+C to kill the app
     signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+    # First-run wizard if model not cached
+    if not model_is_cached(config["model_size"]):
+        logger.info("Model not cached, showing first-run wizard")
+        from PyQt6.QtWidgets import QDialog
+        wizard = FirstRunWizard(config)
+        if wizard.exec() != QDialog.DialogCode.Accepted:
+            logger.info("First-run wizard cancelled")
+            return 0
+        config["model_size"] = wizard.selected_model
+        save_config(config)
 
     # Create and start the Whispr app
     whispr = WhisprApp(config, vocabulary)

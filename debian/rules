@@ -1,0 +1,51 @@
+#!/usr/bin/make -f
+
+export DH_VIRTUALENV_INSTALL_ROOT=/opt/venvs
+export DH_VERBOSE=1
+
+%:
+	dh $@ --with python-virtualenv
+
+override_dh_virtualenv:
+	dh_virtualenv \
+		--python /usr/bin/python3 \
+		--upgrade-pip \
+		--preinstall setuptools \
+		--preinstall wheel \
+		--preinstall hatchling
+
+override_dh_auto_install:
+	dh_auto_install
+	# Desktop entry
+	install -Dm644 whispr.desktop \
+		debian/whispr/usr/share/applications/whispr.desktop
+	# Autostart entry
+	install -Dm644 whispr.desktop \
+		debian/whispr/etc/xdg/autostart/whispr.desktop
+	# Scalable SVG icon
+	install -Dm644 assets/whispr.svg \
+		debian/whispr/usr/share/icons/hicolor/scalable/apps/whispr.svg
+	# PNG icons at standard sizes
+	for size in 16 24 32 48 64 128 256; do \
+		install -Dm644 debian/icons/whispr-$${size}.png \
+			debian/whispr/usr/share/icons/hicolor/$${size}x$${size}/apps/whispr.png; \
+	done
+	# Bundled default config and vocabulary
+	install -Dm644 config/default_config.json \
+		debian/whispr/usr/share/whispr/config/default_config.json
+	install -Dm644 config/vocabulary.json \
+		debian/whispr/usr/share/whispr/config/vocabulary.json
+
+# Skip all binary analysis on the bundled venv — these are pip-installed
+# wheels with their own bundled .so files that dpkg tools can't handle
+override_dh_shlibdeps:
+	true
+
+override_dh_strip:
+	true
+
+override_dh_dwz:
+	true
+
+override_dh_makeshlibs:
+	true

@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -24,6 +25,7 @@ from PyQt6.QtWidgets import (
 )
 
 from whispr.audio import AudioCapture
+from whispr.config import list_profiles
 from whispr.transcribe import AVAILABLE_MODELS
 
 logger = logging.getLogger(__name__)
@@ -146,6 +148,21 @@ class SettingsDialog(QDialog):
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
+        # Vocabulary profile selector
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(QLabel("Vocabulary Profile:"))
+        self._profile_combo = QComboBox()
+        current_profile = self._config.get("vocabulary_profile", "medical")
+        for name in list_profiles():
+            self._profile_combo.addItem(name.capitalize(), name)
+        idx = self._profile_combo.findData(current_profile)
+        if idx >= 0:
+            self._profile_combo.setCurrentIndex(idx)
+        profile_row.addWidget(self._profile_combo, 1)
+        layout.addLayout(profile_row)
+
+        layout.addSpacing(8)
+
         pp = self._config.get("postprocessing", {})
 
         self._pp_punctuation = QCheckBox("Punctuation commands (full stop, comma, etc.)")
@@ -170,12 +187,18 @@ class SettingsDialog(QDialog):
 
         layout.addStretch()
 
+        # Vocabulary import button
+        from PyQt6.QtWidgets import QHBoxLayout as _HBox
+        vocab_row = _HBox()
         vocab_label = QLabel(
-            "Edit vocabulary corrections and expansions in:\n"
-            "~/.config/whispr/vocabulary.json"
+            "Vocabulary file: ~/.config/whispr/vocabulary.json"
         )
         vocab_label.setStyleSheet("color: #777; font-size: 11px;")
-        layout.addWidget(vocab_label)
+        vocab_row.addWidget(vocab_label, 1)
+        import_btn = QPushButton("Import...")
+        import_btn.clicked.connect(self._on_import_vocab)
+        vocab_row.addWidget(import_btn)
+        layout.addLayout(vocab_row)
 
         return widget
 
@@ -241,6 +264,11 @@ class SettingsDialog(QDialog):
 
     # --- Actions ---
 
+    def _on_import_vocab(self) -> None:
+        from whispr.vocab_import import VocabImportDialog
+        dialog = VocabImportDialog(self)
+        dialog.exec()
+
     def _flag_restart(self) -> None:
         self._restart_label.setText("Model change requires restart to take effect.")
         self._restart_label.setVisible(True)
@@ -254,6 +282,7 @@ class SettingsDialog(QDialog):
         self._config["clipboard_threshold_chars"] = self._clipboard_spin.value()
         self._config["audio_device"] = self._device_combo.currentData()
         self._config["hotkey_mode"] = self._mode_combo.currentText()
+        self._config["vocabulary_profile"] = self._profile_combo.currentData()
 
         self._config["postprocessing"]["punctuation_commands"] = self._pp_punctuation.isChecked()
         self._config["postprocessing"]["editing_commands"] = self._pp_editing.isChecked()

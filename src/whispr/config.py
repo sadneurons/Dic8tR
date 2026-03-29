@@ -10,11 +10,24 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "whispr"
 DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.json"
 DEFAULT_VOCAB_PATH = DEFAULT_CONFIG_DIR / "vocabulary.json"
+DEFAULT_PROFILES_DIR = DEFAULT_CONFIG_DIR / "profiles"
 
-# Bundled defaults shipped with the package
-_BUNDLED_DIR = Path(__file__).resolve().parent.parent.parent / "config"
-_BUNDLED_CONFIG = _BUNDLED_DIR / "default_config.json"
-_BUNDLED_VOCAB = _BUNDLED_DIR / "vocabulary.json"
+# Bundled defaults: dev/pip install path, then system-wide .deb install path
+_DEV_DIR = Path(__file__).resolve().parent.parent.parent / "config"
+_SYSTEM_DIR = Path("/usr/share/whispr/config")
+
+
+def _find_bundled(filename: str) -> Path | None:
+    """Find a bundled config file, checking dev path then system path."""
+    for d in (_DEV_DIR, _SYSTEM_DIR):
+        p = d / filename
+        if p.exists():
+            return p
+    return None
+
+
+_BUNDLED_CONFIG = _find_bundled("default_config.json") or _DEV_DIR / "default_config.json"
+_BUNDLED_VOCAB = _find_bundled("vocabulary.json") or _DEV_DIR / "vocabulary.json"
 
 
 def _ensure_config_dir() -> None:
@@ -28,6 +41,53 @@ def _ensure_config_dir() -> None:
                 logger.info("Copied %s to %s", src.name, dst)
             except OSError as e:
                 logger.warning("Failed to copy %s to %s: %s", src.name, dst, e)
+
+
+def _ensure_profiles_dir() -> None:
+    """Create the profiles directory and seed bundled profiles if they don't exist."""
+    DEFAULT_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Find bundled profiles directory
+    for d in (_DEV_DIR / "profiles", _SYSTEM_DIR / "profiles"):
+        if d.is_dir():
+            for src in d.glob("*.json"):
+                dst = DEFAULT_PROFILES_DIR / src.name
+                if not dst.exists():
+                    try:
+                        shutil.copy2(src, dst)
+                        logger.info("Copied profile %s", src.name)
+                    except OSError as e:
+                        logger.warning("Failed to copy profile %s: %s", src.name, e)
+            break
+
+
+def list_profiles() -> list[str]:
+    """Return sorted list of available vocabulary profile names."""
+    _ensure_profiles_dir()
+    profiles = []
+    for p in DEFAULT_PROFILES_DIR.glob("*.json"):
+        profiles.append(p.stem)
+    return sorted(profiles)
+
+
+def load_profile(name: str) -> dict:
+    """Load a vocabulary profile by name.
+
+    Returns the vocabulary dict (corrections, expansions, initial_prompt_terms).
+    Falls back to empty vocabulary if the profile doesn't exist.
+    """
+    _ensure_profiles_dir()
+    empty = {"corrections": {}, "expansions": {}, "initial_prompt_terms": []}
+
+    path = DEFAULT_PROFILES_DIR / f"{name}.json"
+    if path.exists():
+        result = _load_json(path, f"profile '{name}'")
+        if result is not None:
+            logger.info("Loaded vocabulary profile: %s", name)
+            return result
+
+    logger.warning("Profile '%s' not found at %s", name, path)
+    return empty
 
 
 def _load_json(path: Path, description: str) -> dict | None:
@@ -132,6 +192,7 @@ def _empty_config() -> dict:
             "model": "mistral",
             "endpoint": "http://localhost:11434",
         },
+        "vocabulary_profile": "medical",
         "injection_method": "auto",
         "clipboard_threshold_chars": 500,
     }

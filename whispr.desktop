@@ -2,8 +2,10 @@
 Type=Application
 Name=Whispr
 Comment=Local-only Linux dictation using faster-whisper
-Exec=whispr
-Icon=audio-input-microphone
+Exec=/usr/bin/whispr
+Icon=whispr
+Terminal=false
+StartupNotify=false
 X-GNOME-Autostart-enabled=true
-Categories=Utility;Audio;
-Keywords=dictation;speech;whisper;transcription;
+Categories=Utility;Audio;Accessibility;
+Keywords=dictation;speech;whisper;transcription;voice;

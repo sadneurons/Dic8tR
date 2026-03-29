@@ -18,6 +18,7 @@
     "model": "mistral",
     "endpoint": "http://localhost:11434"
   },
+  "vocabulary_profile": "medical",
   "injection_method": "auto",
   "clipboard_threshold_chars": 500
 }

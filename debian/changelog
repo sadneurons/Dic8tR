@@ -1,0 +1,12 @@
+whispr (0.1.0-1) unstable; urgency=low
+
+  * Initial release.
+  * Push-to-talk dictation with faster-whisper GPU transcription.
+  * Punctuation and editing voice commands.
+  * Domain-specific vocabulary corrections and expansions.
+  * System tray integration with PyQt6.
+  * Optional local LLM cleanup via Ollama.
+  * First-run setup wizard with model download.
+  * Vocabulary import from Excel, CSV, JSON.
+
+ -- Whispr Developers <whispr@localhost>  Sat, 28 Mar 2026 23:00:00 +0000

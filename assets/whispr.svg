@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1E88E5"/>
+      <stop offset="100%" stop-color="#1565C0"/>
+    </linearGradient>
+    <linearGradient id="mic" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#E3F2FD"/>
+    </linearGradient>
+  </defs>
+  <!-- Rounded square background -->
+  <rect x="8" y="8" width="240" height="240" rx="48" ry="48" fill="url(#bg)"/>
+  <!-- Microphone body -->
+  <rect x="100" y="52" width="56" height="96" rx="28" fill="url(#mic)"/>
+  <!-- Microphone arc -->
+  <path d="M68 120 a60 60 0 0 0 120 0" stroke="#FFFFFF" stroke-width="12" fill="none" stroke-linecap="round"/>
+  <!-- Stand -->
+  <line x1="128" y1="180" x2="128" y2="210" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round"/>
+  <!-- Base -->
+  <line x1="96" y1="210" x2="160" y2="210" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round"/>
+  <!-- Sound waves (right) -->
+  <path d="M176 88 a28 28 0 0 1 0 48" stroke="#90CAF9" stroke-width="6" fill="none" stroke-linecap="round" opacity="0.8"/>
+  <path d="M192 72 a48 48 0 0 1 0 80" stroke="#90CAF9" stroke-width="6" fill="none" stroke-linecap="round" opacity="0.5"/>
+  <!-- Sound waves (left) -->
+  <path d="M80 88 a28 28 0 0 0 0 48" stroke="#90CAF9" stroke-width="6" fill="none" stroke-linecap="round" opacity="0.8"/>
+  <path d="M64 72 a48 48 0 0 0 0 80" stroke="#90CAF9" stroke-width="6" fill="none" stroke-linecap="round" opacity="0.5"/>
+</svg>
