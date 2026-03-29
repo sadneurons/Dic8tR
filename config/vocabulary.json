@@ -1,0 +1,53 @@
+{
+  "corrections": {
+    "pee tau 217": "pTau217",
+    "p tau 217": "pTau217",
+    "p tau": "pTau",
+    "our bands": "RBANS",
+    "are bands": "RBANS",
+    "fasecas": "Fazekas",
+    "fazakas": "Fazekas",
+    "ellie says": "Elecsys",
+    "a beta": "Abeta",
+    "a beta 42": "Abeta42",
+    "a beta 40": "Abeta40",
+    "a beta 42 40 ratio": "Abeta42/40 ratio",
+    "ace three": "ACE-III",
+    "ace 3": "ACE-III",
+    "mmse": "MMSE",
+    "mini mental": "Mini-Mental",
+    "moca": "MoCA",
+    "csf": "CSF",
+    "mri": "MRI",
+    "pet": "PET",
+    "amyloid pet": "amyloid PET",
+    "fdg pet": "FDG-PET",
+    "tau pet": "tau PET",
+    "lumbar puncture": "lumbar puncture",
+    "cerebrovascular": "cerebrovascular",
+    "mild cognitive impairment": "mild cognitive impairment",
+    "subjective cognitive impairment": "subjective cognitive impairment",
+    "vascular dementia": "vascular dementia",
+    "alzheimer's": "Alzheimer's",
+    "lewy body": "Lewy body",
+    "frontotemporal": "frontotemporal",
+    "neuropsychological": "neuropsychological",
+    "neuropsychiatric": "neuropsychiatric"
+  },
+  "expansions": {
+    "standard intro": "Thank you for referring this patient to the Brain Health Clinic.",
+    "standard close": "I will review this patient again in clinic in approximately six months."
+  },
+  "initial_prompt_terms": [
+    "Patient reviewed in the Brain Health Clinic.",
+    "CSF biomarkers including pTau217, Abeta42/40 ratio.",
+    "RBANS total score. Fazekas score on MRI.",
+    "Cerebrovascular disease. Amyloid PET. Elecsys assay.",
+    "MMSE. ACE-III. MoCA.",
+    "Lumbar puncture performed.",
+    "Mild cognitive impairment. Subjective cognitive impairment.",
+    "Vascular dementia. Alzheimer's disease. Lewy body dementia.",
+    "Frontotemporal dementia. Neuropsychological assessment.",
+    "FDG-PET. Tau PET."
+  ]
+}

@@ -1,0 +1,269 @@
+"""Settings dialog for Whispr.
+
+Qt dialog for configuring model size, language, hotkey, audio device,
+post-processing toggles, and LLM cleanup options.
+"""
+
+import logging
+
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QSpinBox,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from whispr.audio import AudioCapture
+from whispr.transcribe import AVAILABLE_MODELS
+
+logger = logging.getLogger(__name__)
+
+
+class SettingsDialog(QDialog):
+    """Configuration dialog for Whispr.
+
+    Emits settings_changed(dict) with the updated config when accepted.
+    """
+
+    settings_changed = pyqtSignal(dict)
+
+    def __init__(self, config: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Whispr Settings")
+        self.setMinimumWidth(450)
+        self._config = config
+
+        layout = QVBoxLayout(self)
+
+        # Tabs
+        tabs = QTabWidget()
+        tabs.addTab(self._build_transcription_tab(), "Transcription")
+        tabs.addTab(self._build_audio_tab(), "Audio")
+        tabs.addTab(self._build_postprocessing_tab(), "Post-Processing")
+        tabs.addTab(self._build_hotkey_tab(), "Hotkey")
+        tabs.addTab(self._build_llm_tab(), "LLM Cleanup")
+        layout.addWidget(tabs)
+
+        # Restart notice
+        self._restart_label = QLabel("")
+        self._restart_label.setStyleSheet("color: #E65100; font-style: italic;")
+        self._restart_label.setVisible(False)
+        layout.addWidget(self._restart_label)
+
+        # Buttons
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    # --- Tab builders ---
+
+    def _build_transcription_tab(self) -> QWidget:
+        widget = QWidget()
+        form = QFormLayout(widget)
+
+        # Model size
+        self._model_combo = QComboBox()
+        for model in AVAILABLE_MODELS:
+            self._model_combo.addItem(model)
+        current_model = self._config.get("model_size", "large-v3")
+        idx = self._model_combo.findText(current_model)
+        if idx >= 0:
+            self._model_combo.setCurrentIndex(idx)
+        self._model_combo.currentTextChanged.connect(self._flag_restart)
+        form.addRow("Model:", self._model_combo)
+
+        # Language
+        self._language_edit = QLineEdit(self._config.get("language", "en"))
+        self._language_edit.setPlaceholderText("en (or blank for auto-detect)")
+        self._language_edit.setMaximumWidth(100)
+        form.addRow("Language:", self._language_edit)
+
+        # Beam size
+        self._beam_spin = QSpinBox()
+        self._beam_spin.setRange(1, 20)
+        self._beam_spin.setValue(self._config.get("beam_size", 5))
+        form.addRow("Beam size:", self._beam_spin)
+
+        # Injection method
+        self._inject_combo = QComboBox()
+        self._inject_combo.addItems(["auto", "x11", "wayland"])
+        current_method = self._config.get("injection_method", "auto")
+        idx = self._inject_combo.findText(current_method)
+        if idx >= 0:
+            self._inject_combo.setCurrentIndex(idx)
+        form.addRow("Injection method:", self._inject_combo)
+
+        # Clipboard threshold
+        self._clipboard_spin = QSpinBox()
+        self._clipboard_spin.setRange(0, 10000)
+        self._clipboard_spin.setSingleStep(100)
+        self._clipboard_spin.setValue(self._config.get("clipboard_threshold_chars", 500))
+        self._clipboard_spin.setSuffix(" chars")
+        form.addRow("Clipboard paste above:", self._clipboard_spin)
+
+        return widget
+
+    def _build_audio_tab(self) -> QWidget:
+        widget = QWidget()
+        form = QFormLayout(widget)
+
+        # Audio device
+        self._device_combo = QComboBox()
+        self._device_combo.addItem("System default", None)
+
+        try:
+            devices = AudioCapture.list_devices()
+        except Exception:
+            devices = []
+        current_device = self._config.get("audio_device")
+        selected_idx = 0
+
+        for dev in devices:
+            label = f"[{dev['index']}] {dev['name']} ({dev['channels']}ch, {int(dev['sample_rate'])}Hz)"
+            self._device_combo.addItem(label, dev["index"])
+            if dev["index"] == current_device:
+                selected_idx = self._device_combo.count() - 1
+
+        self._device_combo.setCurrentIndex(selected_idx)
+        form.addRow("Input device:", self._device_combo)
+
+        return widget
+
+    def _build_postprocessing_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        pp = self._config.get("postprocessing", {})
+
+        self._pp_punctuation = QCheckBox("Punctuation commands (full stop, comma, etc.)")
+        self._pp_punctuation.setChecked(pp.get("punctuation_commands", True))
+        layout.addWidget(self._pp_punctuation)
+
+        self._pp_editing = QCheckBox("Editing commands (scratch that, scratch word)")
+        self._pp_editing.setChecked(pp.get("editing_commands", True))
+        layout.addWidget(self._pp_editing)
+
+        self._pp_corrections = QCheckBox("Vocabulary corrections")
+        self._pp_corrections.setChecked(pp.get("vocabulary_corrections", True))
+        layout.addWidget(self._pp_corrections)
+
+        self._pp_expansions = QCheckBox("Vocabulary expansions")
+        self._pp_expansions.setChecked(pp.get("vocabulary_expansions", True))
+        layout.addWidget(self._pp_expansions)
+
+        self._pp_capitalisation = QCheckBox("Auto-capitalisation")
+        self._pp_capitalisation.setChecked(pp.get("auto_capitalisation", True))
+        layout.addWidget(self._pp_capitalisation)
+
+        layout.addStretch()
+
+        vocab_label = QLabel(
+            "Edit vocabulary corrections and expansions in:\n"
+            "~/.config/whispr/vocabulary.json"
+        )
+        vocab_label.setStyleSheet("color: #777; font-size: 11px;")
+        layout.addWidget(vocab_label)
+
+        return widget
+
+    def _build_hotkey_tab(self) -> QWidget:
+        widget = QWidget()
+        form = QFormLayout(widget)
+
+        # Hotkey mode
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItems(["push_to_talk", "toggle"])
+        current_mode = self._config.get("hotkey_mode", "push_to_talk")
+        idx = self._mode_combo.findText(current_mode)
+        if idx >= 0:
+            self._mode_combo.setCurrentIndex(idx)
+        form.addRow("Mode:", self._mode_combo)
+
+        # Hotkey display (read-only for now — configurable hotkey capture is v2)
+        hotkey_label = QLabel("Pause/Break or F9")
+        hotkey_label.setStyleSheet("font-weight: bold;")
+        form.addRow("Trigger key:", hotkey_label)
+
+        note = QLabel(
+            "Custom hotkey binding will be available in a future update.\n"
+            "For now, use Pause/Break or F9."
+        )
+        note.setStyleSheet("color: #777; font-size: 11px;")
+        form.addRow("", note)
+
+        return widget
+
+    def _build_llm_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        pp = self._config.get("postprocessing", {})
+        llm = self._config.get("llm", {})
+
+        self._llm_enabled = QCheckBox("Enable local LLM cleanup (requires Ollama)")
+        self._llm_enabled.setChecked(pp.get("llm_cleanup", False))
+        layout.addWidget(self._llm_enabled)
+
+        group = QGroupBox("Ollama Configuration")
+        form = QFormLayout(group)
+
+        self._llm_model = QLineEdit(llm.get("model", "mistral"))
+        form.addRow("Model:", self._llm_model)
+
+        self._llm_endpoint = QLineEdit(llm.get("endpoint", "http://localhost:11434"))
+        form.addRow("Endpoint:", self._llm_endpoint)
+
+        layout.addWidget(group)
+
+        note = QLabel(
+            "All LLM processing is strictly local via Ollama.\n"
+            "No data leaves this device. Install Ollama and pull a model first:\n"
+            "  ollama pull mistral"
+        )
+        note.setStyleSheet("color: #777; font-size: 11px;")
+        layout.addWidget(note)
+
+        layout.addStretch()
+        return widget
+
+    # --- Actions ---
+
+    def _flag_restart(self) -> None:
+        self._restart_label.setText("Model change requires restart to take effect.")
+        self._restart_label.setVisible(True)
+
+    def _on_accept(self) -> None:
+        """Collect values, update config, emit signal, close."""
+        self._config["model_size"] = self._model_combo.currentText()
+        self._config["language"] = self._language_edit.text().strip() or "en"
+        self._config["beam_size"] = self._beam_spin.value()
+        self._config["injection_method"] = self._inject_combo.currentText()
+        self._config["clipboard_threshold_chars"] = self._clipboard_spin.value()
+        self._config["audio_device"] = self._device_combo.currentData()
+        self._config["hotkey_mode"] = self._mode_combo.currentText()
+
+        self._config["postprocessing"]["punctuation_commands"] = self._pp_punctuation.isChecked()
+        self._config["postprocessing"]["editing_commands"] = self._pp_editing.isChecked()
+        self._config["postprocessing"]["vocabulary_corrections"] = self._pp_corrections.isChecked()
+        self._config["postprocessing"]["vocabulary_expansions"] = self._pp_expansions.isChecked()
+        self._config["postprocessing"]["auto_capitalisation"] = self._pp_capitalisation.isChecked()
+        self._config["postprocessing"]["llm_cleanup"] = self._llm_enabled.isChecked()
+
+        self._config["llm"]["model"] = self._llm_model.text().strip()
+        self._config["llm"]["endpoint"] = self._llm_endpoint.text().strip()
+
+        self.settings_changed.emit(self._config)
+        self.accept()

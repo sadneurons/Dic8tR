@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "whispr"
+version = "0.1.0"
+description = "Local-only Linux dictation system tray application using faster-whisper"
+requires-python = ">=3.11"
+dependencies = [
+    "faster-whisper>=1.0.0",
+    "sounddevice>=0.4.6",
+    "numpy>=1.24",
+    "PyQt6>=6.5",
+    "pynput>=1.7.6",
+]
+
+[project.optional-dependencies]
+llm = ["ollama>=0.2.0"]
+dev = ["pytest>=7.0", "pytest-qt>=4.2"]
+
+[project.scripts]
+whispr = "whispr.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/whispr"]

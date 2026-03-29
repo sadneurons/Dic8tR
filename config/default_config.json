@@ -1,0 +1,23 @@
+{
+  "model_size": "large-v3",
+  "language": "en",
+  "beam_size": 5,
+  "hotkey": "ctrl+shift+space",
+  "hotkey_mode": "push_to_talk",
+  "audio_device": null,
+  "postprocessing": {
+    "punctuation_commands": true,
+    "editing_commands": true,
+    "vocabulary_corrections": true,
+    "vocabulary_expansions": true,
+    "auto_capitalisation": true,
+    "llm_cleanup": false
+  },
+  "llm": {
+    "provider": "ollama",
+    "model": "mistral",
+    "endpoint": "http://localhost:11434"
+  },
+  "injection_method": "auto",
+  "clipboard_threshold_chars": 500
+}
