@@ -67,12 +67,22 @@ class AudioCapture:
     def is_recording(self) -> bool:
         return self._recording
 
+    def _refresh_sample_rate(self) -> None:
+        """Re-query the device sample rate (device may have changed)."""
+        try:
+            dev_index = self.device if self.device is not None else sd.default.device[0]
+            dev_info = sd.query_devices(dev_index)
+            self._native_sr = int(dev_info["default_samplerate"])
+        except Exception:
+            pass  # keep last known rate
+
     def start(self) -> None:
         """Open the audio stream and begin accumulating chunks."""
         if self._recording:
             logger.warning("start() called while already recording")
             return
 
+        self._refresh_sample_rate()
         self._chunks = []
         self._recording = True
 

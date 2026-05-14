@@ -11,6 +11,8 @@ from typing import Callable
 import numpy as np
 from faster_whisper import WhisperModel
 
+from whispr.config import models_dir
+
 logger = logging.getLogger(__name__)
 
 # Models available in settings UI
@@ -50,16 +52,29 @@ class WhisperTranscriber:
     def is_loaded(self) -> bool:
         return self._model is not None
 
+    def reset_model(self) -> None:
+        """Discard the loaded model. The next load_model() will reload from disk.
+
+        Used by the hot-swap path when the user changes model_size in settings.
+        Holds the transcription lock so we don't drop the model out from under
+        an in-flight transcribe() call.
+        """
+        with self._lock:
+            self._model = None
+
     def load_model(self) -> None:
         """Load the Whisper model into GPU memory. Call once at startup."""
         logger.info(
             "Loading Whisper model '%s' on %s (%s)...",
             self.model_size, self.device, self.compute_type,
         )
+        target = models_dir()
+        target.mkdir(parents=True, exist_ok=True)
         self._model = WhisperModel(
             self.model_size,
             device=self.device,
             compute_type=self.compute_type,
+            download_root=str(target),
         )
         logger.info("Model loaded successfully")
 
@@ -120,12 +135,15 @@ class WhisperTranscriber:
                 )
 
             text = text.strip()
+            # Avoid logging transcript text at INFO so it does not leak into
+            # default captures (journald, shell redirects). Length+lang only.
             logger.info(
-                "Transcription complete (lang=%s, prob=%.2f): %s",
+                "Transcription complete (lang=%s, prob=%.2f, %d chars)",
                 info.language,
                 info.language_probability,
-                text[:100] + ("..." if len(text) > 100 else ""),
+                len(text),
             )
+            logger.debug("Transcript text: %s", text)
             return text
 
         except Exception as e:

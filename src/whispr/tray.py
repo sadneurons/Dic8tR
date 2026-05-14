@@ -41,6 +41,8 @@ class WhisprTray(QObject):
 
     Signals:
         toggle_enabled: emitted when user toggles listening on/off
+        toggle_listening: emitted on left-click — request to start or stop
+            a dictation segment (click-to-toggle activation)
         profile_changed(str): emitted when user selects a vocabulary profile
         settings_requested: emitted when user clicks "Settings"
         import_vocab_requested: emitted when user clicks "Import Vocabulary..."
@@ -49,6 +51,7 @@ class WhisprTray(QObject):
     """
 
     toggle_enabled = pyqtSignal(bool)
+    toggle_listening = pyqtSignal()
     profile_changed = pyqtSignal(str)
     settings_requested = pyqtSignal()
     import_vocab_requested = pyqtSignal()
@@ -82,6 +85,9 @@ class WhisprTray(QObject):
         self._profile_actions: dict[str, QAction] = {}
         self._build_menu()
         self._tray.setContextMenu(self._menu)
+
+        # Left-click activates dictation (click-to-toggle)
+        self._tray.activated.connect(self._on_tray_activated)
 
     def show(self) -> None:
         """Show the tray icon."""
@@ -190,6 +196,18 @@ class WhisprTray(QObject):
             self._active_profile = name
             self.profile_changed.emit(name)
             logger.info("Profile selected: %s", name)
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        """Left-click on the tray icon toggles a dictation segment.
+
+        Ignored while loading or when listening is disabled — the user can
+        only start/stop dictation once the model is ready.
+        """
+        if reason != QSystemTrayIcon.ActivationReason.Trigger:
+            return
+        if not self._enabled or self._state == TrayState.LOADING:
+            return
+        self.toggle_listening.emit()
 
     def _on_toggle(self) -> None:
         self._enabled = not self._enabled

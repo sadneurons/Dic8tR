@@ -138,6 +138,37 @@ class TestVocabularyCorrections:
         result = postprocess("pee tau 217 was positive", corrections=self.CORRECTIONS, enable_capitalisation=False)
         assert result == "pTau217 was positive"
 
+    def test_short_correction_does_not_match_inside_word(self):
+        # "ad" should not rewrite "add", "advance", "advised", "shall".
+        corrections = {"ad": "Alzheimer's disease"}
+        result = postprocess(
+            "add the advance plan and advise the patient",
+            corrections=corrections,
+            enable_capitalisation=False,
+        )
+        assert result == "add the advance plan and advise the patient"
+
+    def test_short_correction_matches_whole_word(self):
+        corrections = {"ad": "Alzheimer's disease"}
+        result = postprocess(
+            "patient has ad and family history.",
+            corrections=corrections,
+            enable_capitalisation=False,
+        )
+        assert "Alzheimer's disease" in result
+        assert "add" not in result.lower().split()  # no spurious matches
+
+    def test_correction_matches_at_string_boundaries(self):
+        # Word-boundary fix must still match at start/end of string and
+        # adjacent to punctuation.
+        corrections = {"ad": "Alzheimer's disease"}
+        assert postprocess("ad confirmed", corrections=corrections, enable_capitalisation=False) \
+            == "Alzheimer's disease confirmed"
+        assert postprocess("confirmed ad", corrections=corrections, enable_capitalisation=False) \
+            == "confirmed Alzheimer's disease"
+        assert postprocess("(ad)", corrections=corrections, enable_capitalisation=False) \
+            == "(Alzheimer's disease)"
+
 
 # --- Vocabulary expansions ---
 
@@ -153,6 +184,25 @@ class TestVocabularyExpansions:
     def test_expansion_case_insensitive(self):
         result = postprocess("Standard Intro", expansions=self.EXPANSIONS, enable_capitalisation=False)
         assert result == "Thank you for referring this patient to the Brain Health Clinic."
+
+    def test_short_expansion_does_not_match_inside_word(self):
+        # Shorthand 'dr' should not rewrite 'drop' / 'drum' / 'address'.
+        expansions = {"dr": "Doctor"}
+        result = postprocess(
+            "drop the drum and address the issue",
+            expansions=expansions,
+            enable_capitalisation=False,
+        )
+        assert result == "drop the drum and address the issue"
+
+    def test_short_expansion_matches_whole_word(self):
+        expansions = {"dr": "Doctor"}
+        result = postprocess(
+            "dr smith reviewed dr jones",
+            expansions=expansions,
+            enable_capitalisation=False,
+        )
+        assert result == "Doctor smith reviewed Doctor jones"
 
 
 # --- Capitalisation ---

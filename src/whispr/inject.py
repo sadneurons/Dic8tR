@@ -53,6 +53,80 @@ def _xdotool_key(keys: str) -> bool:
         return False
 
 
+# ── Clipboard save / restore ──────────────────────────────────────────
+#
+# Privacy note: when we route a transcript through the system clipboard,
+# we save the previous contents, paste, then restore them. This prevents
+# the dictated text from lingering for the next app that pastes — but it
+# does NOT prevent active clipboard managers (Klipper, GPaste, CopyQ,
+# Parcellite) from snapshotting the dictated text the moment we set the
+# clipboard. To fully avoid that, dictation should bypass the clipboard
+# path entirely (force xdotool/ydotool type). That's a follow-up.
+
+_CLIPBOARD_RESTORE_DELAY_S = 0.1
+
+
+def _read_clipboard_x11() -> bytes | None:
+    """Return current X11 CLIPBOARD selection contents, or None on failure."""
+    if not _check_tool("xclip"):
+        return None
+    try:
+        result = subprocess.run(
+            ["xclip", "-selection", "clipboard", "-o"],
+            capture_output=True,
+            timeout=1,
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _write_clipboard_x11(data: bytes) -> None:
+    """Set the X11 CLIPBOARD selection. Empty data clears it."""
+    if not _check_tool("xclip"):
+        return
+    try:
+        subprocess.run(
+            ["xclip", "-selection", "clipboard"],
+            input=data,
+            timeout=1,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("Failed to restore X11 clipboard: %s", e)
+
+
+def _read_clipboard_wayland() -> bytes | None:
+    """Return current Wayland clipboard contents, or None on failure."""
+    if not _check_tool("wl-paste"):
+        return None
+    try:
+        result = subprocess.run(
+            ["wl-paste", "-n"],
+            capture_output=True,
+            timeout=1,
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _write_clipboard_wayland(data: bytes) -> None:
+    """Set the Wayland clipboard. Empty data clears it."""
+    if not _check_tool("wl-copy"):
+        return
+    try:
+        if not data:
+            subprocess.run(["wl-copy", "--clear"], timeout=1)
+        else:
+            subprocess.run(["wl-copy", "--"], input=data, timeout=1)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("Failed to restore Wayland clipboard: %s", e)
+
+
 def _xdotool_type_segment(text: str) -> bool:
     """Type a plain text segment (no special chars) via xdotool."""
     if not text:
@@ -148,11 +222,16 @@ def _split_segments(text: str) -> list[tuple[str, str]]:
 
 
 def _clipboard_paste_x11(text: str) -> bool:
-    """Copy text to clipboard via xclip, then Ctrl+V via xdotool."""
+    """Copy text to clipboard via xclip, then Ctrl+V via xdotool.
+
+    Saves the prior clipboard contents and restores them after paste so the
+    dictated text does not linger in the clipboard for the next app to read.
+    """
     if not _check_tool("xclip"):
         logger.error("xclip not found. Install with: sudo apt install xclip")
         return False
 
+    saved = _read_clipboard_x11()
     try:
         subprocess.run(
             ["xclip", "-selection", "clipboard"],
@@ -167,6 +246,11 @@ def _clipboard_paste_x11(text: str) -> bool:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         logger.error("Clipboard paste (X11) failed: %s", e)
         return False
+    finally:
+        # Let the target app finish absorbing the paste before we overwrite
+        # the clipboard, otherwise some apps re-read mid-paste and get empty.
+        time.sleep(_CLIPBOARD_RESTORE_DELAY_S)
+        _write_clipboard_x11(saved if saved is not None else b"")
 
 
 # ── Editor interaction commands ───────────────────────────────────────
@@ -293,8 +377,14 @@ def _ydotool_key_combo(combo: str) -> bool:
 
 
 def _clipboard_paste_wayland(text: str) -> bool:
+    """Copy text to clipboard via wl-copy, then Ctrl+V via ydotool.
+
+    Saves the prior clipboard contents and restores them after paste so the
+    dictated text does not linger in the clipboard for the next app to read.
+    """
     if not _check_tool("wl-copy") or not _check_tool("ydotool"):
         return False
+    saved = _read_clipboard_wayland()
     try:
         subprocess.run(["wl-copy", "--", text], check=True, timeout=5)
         time.sleep(0.02)
@@ -303,3 +393,6 @@ def _clipboard_paste_wayland(text: str) -> bool:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         logger.error("Clipboard paste (Wayland) failed: %s", e)
         return False
+    finally:
+        time.sleep(_CLIPBOARD_RESTORE_DELAY_S)
+        _write_clipboard_wayland(saved if saved is not None else b"")

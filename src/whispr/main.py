@@ -21,6 +21,7 @@ from whispr.audio import AudioCapture
 from whispr.audio_feedback import play_start_sound, play_stop_sound
 from whispr.config import load_config, load_vocabulary, load_profile, build_initial_prompt, save_config
 from whispr.first_run import FirstRunWizard, model_is_cached
+from whispr.hotkey import parse_hotkey, start_listener as start_hotkey_listener
 from whispr.inject import inject_text, send_undo, send_redo, send_key_combo, send_delete_word
 from whispr.llm_cleanup import LLMCleanup
 from whispr.postprocess import postprocess
@@ -85,6 +86,15 @@ class WhisprApp(QObject):
         self._hotkey_listener = None
         self._last_text = ""
 
+        # Shared recording flag, mutated from at least three threads: the
+        # pynput hotkey listener thread, the Qt main thread (tray click), and
+        # the continuous-mode QTimer dispatcher (also Qt thread). The lock
+        # makes check-and-set on this flag atomic, and is held across the
+        # audio start/stop calls so two concurrent triggers can't open the
+        # input stream twice or close it under each other.
+        self._recording = False
+        self._recording_lock = threading.Lock()
+
         # Wire signals
         self.recording_started.connect(self._on_recording_started)
         self.recording_stopped.connect(self._on_recording_stopped)
@@ -94,6 +104,7 @@ class WhisprApp(QObject):
         self.tray.settings_requested.connect(self._on_settings_requested)
         self.tray.import_vocab_requested.connect(self._on_import_vocab)
         self.tray.profile_changed.connect(self._on_profile_changed)
+        self.tray.toggle_listening.connect(self._on_tray_toggle)
 
     def _init_llm_cleanup(self) -> None:
         """Initialise the local LLM cleanup module if enabled."""
@@ -141,54 +152,75 @@ class WhisprApp(QObject):
 
     # ── Hotkey listener ───────────────────────────────────────────────
 
-    def _start_hotkey_listener(self) -> None:
-        try:
-            from pynput import keyboard
-        except ImportError:
-            logger.error("pynput not installed")
-            return
+    def _start_recording(self) -> bool:
+        """Begin audio capture. Returns True on success.
 
-        recording = False
-        trigger_keys = {
-            keyboard.Key.pause,
-            keyboard.Key.f9,
-        }
-
-        def is_trigger(key):
-            return key in trigger_keys
-
-        def on_press(key):
-            nonlocal recording
-            if is_trigger(key) and not recording and self.tray.enabled:
-                recording = True
-                try:
-                    if self._features.get("audio_feedback", False):
-                        play_start_sound()
-                    self.audio.start()
-                    self.recording_started.emit()
-                except Exception as e:
-                    recording = False
-                    logger.error("Failed to start recording: %s", e)
-
-        def on_release(key):
-            nonlocal recording
-            if is_trigger(key) and recording:
-                recording = False
+        Holds the recording lock across audio.start() so a near-simultaneous
+        click + hotkey press can't both pass the check and open two streams.
+        """
+        with self._recording_lock:
+            if self._recording or not self.tray.enabled:
+                return False
+            try:
                 if self._features.get("audio_feedback", False):
-                    play_stop_sound()
-                audio = self.audio.stop()
-                if len(audio) > 0:
-                    self.recording_stopped.emit(audio)
-                else:
-                    QTimer.singleShot(0, lambda: self.tray.set_state(TrayState.IDLE))
+                    play_start_sound()
+                self.audio.start()
+                self._recording = True
+            except Exception as e:
+                logger.error("Failed to start recording: %s", e)
+                return False
+        # Emit outside the lock — slot dispatch can block briefly on the Qt
+        # event loop, and we don't want unrelated callers to wait on it.
+        self.recording_started.emit()
+        return True
 
-        self._hotkey_listener = keyboard.Listener(
-            on_press=on_press,
-            on_release=on_release,
+    def _stop_recording(self) -> None:
+        """End audio capture and dispatch the buffer for transcription.
+
+        Holds the recording lock across audio.stop() so a hotkey-release and a
+        tray-click arriving at the same moment can't both call stop() (which
+        would corrupt the shared chunk buffer in AudioCapture).
+        """
+        with self._recording_lock:
+            if not self._recording:
+                return
+            self._recording = False
+            if self._features.get("audio_feedback", False):
+                play_stop_sound()
+            audio = self.audio.stop()
+        if len(audio) > 0:
+            self.recording_stopped.emit(audio)
+        else:
+            QTimer.singleShot(0, lambda: self.tray.set_state(TrayState.IDLE))
+
+    @pyqtSlot()
+    def _on_tray_toggle(self) -> None:
+        """Left-click on the tray icon: start dictation if idle, stop if listening."""
+        if self._recording:
+            self._stop_recording()
+        else:
+            self._start_recording()
+
+    def _start_hotkey_listener(self) -> None:
+        hotkey_spec = self.config.get("hotkey") or "pause"
+        combo = parse_hotkey(hotkey_spec)
+        if not combo:
+            logger.warning(
+                "Could not parse configured hotkey %r — falling back to Pause",
+                hotkey_spec,
+            )
+            combo = parse_hotkey("pause")
+            hotkey_spec = "pause"
+
+        self._hotkey_listener = start_hotkey_listener(
+            combo,
+            on_combo_active=self._start_recording,
+            on_combo_release=self._stop_recording,
         )
-        self._hotkey_listener.daemon = True
-        self._hotkey_listener.start()
-        logger.info("Hotkey listener started (Pause/Break, F9)")
+        if self._hotkey_listener is None:
+            logger.error("Hotkey listener failed to start (pynput unavailable?)")
+            return
+        logger.info("Hotkey listener started: %s (push-to-talk)", hotkey_spec)
 
     # ── Recording handlers ────────────────────────────────────────────
 
@@ -269,7 +301,9 @@ class WhisprApp(QObject):
             logger.info("Empty transcription, skipping")
             return
 
-        logger.info("Raw: %s", raw_text)
+        # Transcript text logged at DEBUG only so it does not appear in
+        # default INFO-level captures (journald, shell redirects, etc.).
+        logger.debug("Raw: %s", raw_text)
 
         processed = postprocess(
             raw_text,
@@ -288,7 +322,7 @@ class WhisprApp(QObject):
             self._handle_action(processed)
             return
 
-        logger.info("Processed: %s", processed)
+        logger.debug("Processed: %s", processed)
 
         if self._features.get("preview_overlay", False):
             self._preview.show_text(processed)
@@ -373,6 +407,7 @@ class WhisprApp(QObject):
             return
 
         self._continuous_active = True
+        self._continuous_failures = 0
         logger.info("Continuous mode started")
         self.tray.show_notification("Whispr", "Continuous listening active", 2000)
         self._continuous_record_cycle()
@@ -395,9 +430,21 @@ class WhisprApp(QObject):
         try:
             self.audio.start()
             self.tray.set_state(TrayState.LISTENING)
+            self._continuous_failures = 0
         except Exception as e:
-            logger.error("Continuous mode audio start failed: %s", e)
-            self._continuous_active = False
+            self._continuous_failures += 1
+            if self._continuous_failures >= 3:
+                logger.error("Continuous mode: %d consecutive failures, stopping. Last error: %s",
+                             self._continuous_failures, e)
+                self._continuous_active = False
+                self.tray.set_state(TrayState.IDLE)
+                self.tray.show_notification(
+                    "Whispr", "Continuous mode stopped — audio device unavailable", 5000)
+                return
+            # Retry with backoff
+            delay = self._continuous_failures * 2000
+            logger.warning("Continuous mode audio failed, retrying in %dms: %s", delay, e)
+            QTimer.singleShot(delay, self._continuous_record_cycle)
             return
 
         # Record for 5 seconds then process (VAD will trim silence)
@@ -414,7 +461,7 @@ class WhisprApp(QObject):
 
         # Start next segment after a short gap
         if self._continuous_active:
-            QTimer.singleShot(200, self._continuous_record_cycle)
+            QTimer.singleShot(500, self._continuous_record_cycle)
 
     # ── Profile switching ─────────────────────────────────────────────
 
@@ -484,11 +531,60 @@ class WhisprApp(QObject):
         logger.info("Settings saved")
 
         if new_config["model_size"] != old_model:
+            self._hot_swap_model(new_config["model_size"])
+
+    def _hot_swap_model(self, new_size: str) -> None:
+        """Swap the active Whisper model in-place without restarting the app.
+
+        Refuses if dictation is currently in flight (would lose audio) or if
+        the requested model isn't on disk (user must run the first-run wizard
+        to download it). Otherwise unloads the current model, switches to the
+        new model_size, and kicks off an async reload.
+        """
+        if self._recording or self.tray.state == TrayState.PROCESSING:
             self.tray.show_notification(
                 "Whispr",
-                f"Model changed to {new_config['model_size']}. Restart Whispr to apply.",
+                "Finish the current dictation before changing model.",
+                3000,
+            )
+            return
+
+        if not model_is_cached(new_size):
+            self.tray.show_notification(
+                "Whispr",
+                f"Model '{new_size}' not downloaded. Open Settings → first-run wizard.",
                 5000,
             )
+            return
+
+        logger.info("Hot-swapping model: %s → %s", self.transcriber.model_size, new_size)
+        self.transcriber.model_size = new_size
+        self.transcriber.reset_model()
+        self.tray.set_state(TrayState.LOADING)
+        self.tray.show_notification("Whispr", f"Loading {new_size}...", 2000)
+
+        def _on_swap_complete() -> None:
+            QTimer.singleShot(0, lambda: self.tray.set_state(TrayState.IDLE))
+            QTimer.singleShot(
+                0,
+                lambda: self.tray.show_notification(
+                    "Whispr", f"Model switched to {new_size}", 2000
+                ),
+            )
+
+        def _on_swap_error(err: Exception) -> None:
+            QTimer.singleShot(0, lambda: self.tray.set_state(TrayState.IDLE))
+            QTimer.singleShot(
+                0,
+                lambda: self.tray.show_notification(
+                    "Whispr Error", f"Model load failed: {err}", 5000
+                ),
+            )
+
+        self.transcriber.load_model_async(
+            on_complete=_on_swap_complete,
+            on_error=_on_swap_error,
+        )
 
     # ── Quit ──────────────────────────────────────────────────────────
 

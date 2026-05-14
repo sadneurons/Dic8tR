@@ -12,6 +12,21 @@ DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.json"
 DEFAULT_VOCAB_PATH = DEFAULT_CONFIG_DIR / "vocabulary.json"
 DEFAULT_PROFILES_DIR = DEFAULT_CONFIG_DIR / "profiles"
 
+
+MODELS_DIR = Path.home() / ".local" / "share" / "whispr" / "models"
+
+
+def models_dir() -> Path:
+    """Persistent directory for downloaded Whisper models.
+
+    Hard-coded under ~/.local/share rather than ~/.cache so the ~3 GB model
+    survives routine cache cleanups. XDG_DATA_HOME is deliberately ignored
+    to keep the path predictable when the app is launched from sandboxed
+    environments (e.g. the VS Code snap sets its own XDG_DATA_HOME) — this
+    matches the project's convention for ~/.config/whispr in this module.
+    """
+    return MODELS_DIR
+
 # Bundled defaults: dev/pip install path, then system-wide .deb install path
 _DEV_DIR = Path(__file__).resolve().parent.parent.parent / "config"
 _SYSTEM_DIR = Path("/usr/share/whispr/config")

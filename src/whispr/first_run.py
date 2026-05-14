@@ -11,6 +11,8 @@ import subprocess
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+
+from whispr.config import models_dir
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -44,15 +46,54 @@ MODEL_INFO = {
 }
 
 
+# Files faster-whisper needs to load a Systran model. If any of these is
+# missing or zero-byte the cache is treated as incomplete and the first-run
+# wizard kicks in to redownload — catches sleep/network interruptions that
+# leave a partial directory.
+_REQUIRED_MODEL_FILES = (
+    "config.json",
+    "model.bin",
+    "tokenizer.json",
+    "preprocessor_config.json",
+    "vocabulary.json",
+)
+
+
+def _snapshot_is_intact(snapshot: Path) -> bool:
+    """True if every required model file exists and is non-empty.
+
+    Path.exists()/stat() follow symlinks, so a dangling symlink (broken HF
+    blob link) returns False here — exactly what we want.
+    """
+    for name in _REQUIRED_MODEL_FILES:
+        path = snapshot / name
+        try:
+            if not path.exists() or path.stat().st_size == 0:
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def model_is_cached(model_size: str) -> bool:
-    """Check if the faster-whisper model is already downloaded."""
-    cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+    """Check if the faster-whisper model is already downloaded and intact.
+
+    Walks every snapshot directory under the repo and returns True if at
+    least one has all required files non-empty. Partial downloads (missing
+    model.bin, zero-byte blobs, dangling symlinks) return False so the wizard
+    redownloads instead of failing later inside faster-whisper.
+    """
     info = MODEL_INFO.get(model_size)
     if not info:
         return False
     repo_dir = "models--" + info["repo"].replace("/", "--")
-    snapshot_dir = cache_dir / repo_dir / "snapshots"
-    return snapshot_dir.exists() and any(snapshot_dir.iterdir())
+    snapshots = models_dir() / repo_dir / "snapshots"
+    if not snapshots.exists():
+        return False
+    for snap in snapshots.iterdir():
+        if snap.is_dir() and _snapshot_is_intact(snap):
+            return True
+    return False
 
 
 class SystemCheckResult:
@@ -122,8 +163,11 @@ class ModelDownloadWorker(QThread):
 
             self.progress.emit(10, f"Downloading {self.model_size} from Hugging Face...")
 
+            target = models_dir()
+            target.mkdir(parents=True, exist_ok=True)
             snapshot_download(
                 repo_id=info["repo"],
+                cache_dir=str(target),
                 allow_patterns=["*"],
             )
 
@@ -381,7 +425,7 @@ class FirstRunWizard(QDialog):
         else:
             self._model_note.setText(
                 f"This model will be downloaded from Hugging Face on the next step.\n"
-                f"The download is stored in ~/.cache/huggingface/ and only happens once."
+                f"The download is stored in {models_dir()} and only happens once."
             )
 
     # --- Download ---

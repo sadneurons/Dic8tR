@@ -168,7 +168,8 @@ def _check_action_commands(text: str, custom_commands: dict[str, str] | None = N
     if custom_commands:
         for phrase, action in custom_commands.items():
             if normalized == phrase.lower():
-                logger.info("Custom command: '%s' -> %s", phrase, action)
+                # Phrase is user-defined; may contain identifiers. DEBUG only.
+                logger.debug("Custom command: '%s' -> %s", phrase, action)
                 return action
 
     # Built-in action commands
@@ -181,9 +182,14 @@ def _check_action_commands(text: str, custom_commands: dict[str, str] | None = N
 
 
 def _apply_expansions(text: str, expansions: dict[str, str]) -> str:
-    """Replace spoken shorthand with full expansion text."""
+    """Replace spoken shorthand with full expansion text — whole-phrase only.
+
+    Uses non-word lookarounds (rather than \\b) so phrases that begin or end
+    with non-word characters (e.g. "e.g.") still match. Without this guard
+    a shorthand like "ad" would rewrite "add", "advance", etc.
+    """
     for phrase, expansion in expansions.items():
-        pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+        pattern = re.compile(r'(?<!\w)' + re.escape(phrase) + r'(?!\w)', re.IGNORECASE)
         text = pattern.sub(expansion, text)
     return text
 
@@ -263,9 +269,14 @@ def _apply_punctuation_commands(text: str) -> str:
 
 
 def _apply_corrections(text: str, corrections: dict[str, str]) -> str:
-    """Apply vocabulary corrections (case-insensitive match, exact replacement)."""
+    """Apply vocabulary corrections — whole-phrase, case-insensitive.
+
+    Uses non-word lookarounds (rather than \\b) so corrections that begin or
+    end with non-word characters still match. Prevents a correction like
+    "ad" → "Alzheimer’s disease" from rewriting "add" or "advance".
+    """
     for wrong, right in corrections.items():
-        pattern = re.compile(re.escape(wrong), re.IGNORECASE)
+        pattern = re.compile(r'(?<!\w)' + re.escape(wrong) + r'(?!\w)', re.IGNORECASE)
         text = pattern.sub(right, text)
     return text
 
