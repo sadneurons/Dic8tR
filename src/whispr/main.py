@@ -22,7 +22,14 @@ from whispr.audio_feedback import play_start_sound, play_stop_sound
 from whispr.config import load_config, load_vocabulary, load_profile, build_initial_prompt, save_config
 from whispr.first_run import FirstRunWizard, model_is_cached
 from whispr.hotkey import parse_hotkey, start_listener as start_hotkey_listener
-from whispr.inject import inject_text, send_undo, send_redo, send_key_combo, send_delete_word
+from whispr.inject import (
+    inject_text,
+    send_undo,
+    send_redo,
+    send_key_combo,
+    send_delete_word,
+    send_backspace,
+)
 from whispr.llm_cleanup import LLMCleanup
 from whispr.postprocess import postprocess
 from whispr.preview_overlay import PreviewOverlay
@@ -84,7 +91,15 @@ class WhisprApp(QObject):
         self._continuous_capture: ContinuousCapture | None = None
 
         self._hotkey_listener = None
+        # Last successful injection — used by the "scratch that" handler.
+        # _last_injection_chars counts characters actually sent (including the
+        # leading space inject_text() prepends), and _last_injection_clipboard
+        # records whether clipboard-paste was used. Together they let us
+        # send Ctrl+Z (clipboard, atomic) vs a Backspace burst of the exact
+        # length (xdotool type, one-undo-per-char in most editors).
         self._last_text = ""
+        self._last_injection_chars = 0
+        self._last_injection_clipboard = False
 
         # Shared recording flag, mutated from at least three threads: the
         # pynput hotkey listener thread, the Qt main thread (tray click), and
@@ -339,16 +354,25 @@ class WhisprApp(QObject):
         method = self.config["injection_method"]
 
         if action == "ACTION:SCRATCH_THAT":
-            # Undo the last injection by sending Ctrl+Z
-            if self._last_text:
-                # Estimate number of undos needed (one per character for xdotool type,
-                # or one for clipboard paste). Send a single Ctrl+Z which undoes
-                # the last atomic operation in most editors.
-                send_undo(method=method)
-                logger.info("Scratch that — sent undo")
-                self._last_text = ""
-            else:
+            # Clipboard paste is one atomic edit → one Ctrl+Z reverses it.
+            # xdotool type writes char-by-char and most editors record each as
+            # a separate undo step, so Ctrl+Z would only drop one letter.
+            # Backspace the exact length instead, which works regardless of
+            # the target app's undo granularity.
+            if not self._last_text:
                 logger.info("Scratch that — nothing to undo")
+            elif self._last_injection_clipboard:
+                send_undo(method=method)
+                logger.info("Scratch that — sent Ctrl+Z (clipboard paste)")
+            else:
+                send_backspace(self._last_injection_chars, method=method)
+                logger.info(
+                    "Scratch that — backspaced %d chars (typed)",
+                    self._last_injection_chars,
+                )
+            self._last_text = ""
+            self._last_injection_chars = 0
+            self._last_injection_clipboard = False
 
         elif action == "ACTION:SCRATCH_WORD":
             send_delete_word(method=method)
@@ -391,7 +415,12 @@ class WhisprApp(QObject):
         logger.info("Preview dismissed, text not injected")
 
     def _inject(self, text: str) -> None:
-        """Inject text into the focused window."""
+        """Inject text into the focused window.
+
+        Records the method and length actually used so the next "scratch that"
+        can produce the right reversal — Ctrl+Z (atomic) for clipboard paste,
+        or a Backspace burst of exactly the right length for xdotool type.
+        """
         ok = inject_text(
             text,
             clipboard_threshold=self.config["clipboard_threshold_chars"],
@@ -399,6 +428,16 @@ class WhisprApp(QObject):
         )
         if ok:
             self._last_text = text
+            # Mirror inject_text's leading-space prepend (skipped only when the
+            # text begins with a newline) so the recorded length matches what
+            # was actually typed.
+            prepended_len = len(text) + (
+                1 if text and text[0] != "\n" else 0
+            )
+            self._last_injection_chars = prepended_len
+            self._last_injection_clipboard = (
+                prepended_len > self.config["clipboard_threshold_chars"]
+            )
             self.tray.set_last_transcript(text)
         else:
             logger.error("Text injection failed")
@@ -501,6 +540,7 @@ class WhisprApp(QObject):
     def _apply_settings(self, new_config: dict) -> None:
         old_model = self.config.get("model_size")
         old_profile = self.config.get("vocabulary_profile")
+        old_hotkey = self.config.get("hotkey") or "pause"
         self.config = new_config
 
         self._pp_config = new_config["postprocessing"]
@@ -508,6 +548,20 @@ class WhisprApp(QObject):
 
         self.transcriber.language = new_config["language"]
         self.transcriber.beam_size = new_config["beam_size"]
+
+        # Restart the global hotkey listener if the bound key changed —
+        # parse_hotkey result is captured at start, so a config change is
+        # otherwise inert until the next launch.
+        new_hotkey = new_config.get("hotkey") or "pause"
+        if new_hotkey != old_hotkey:
+            if self._hotkey_listener is not None:
+                try:
+                    self._hotkey_listener.stop()
+                except Exception as e:
+                    logger.warning("Failed to stop old hotkey listener: %s", e)
+                self._hotkey_listener = None
+            self._start_hotkey_listener()
+            self.tray.show_notification("Whispr", f"Hotkey: {new_hotkey}", 2000)
 
         # If profile changed via settings dialog, apply it
         new_profile = new_config.get("vocabulary_profile")

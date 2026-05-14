@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 
 from whispr.audio import AudioCapture
 from whispr.config import list_profiles
+from whispr.hotkey import parse_hotkey
 from whispr.transcribe import AVAILABLE_MODELS
 
 logger = logging.getLogger(__name__)
@@ -216,19 +217,43 @@ class SettingsDialog(QDialog):
             self._mode_combo.setCurrentIndex(idx)
         form.addRow("Mode:", self._mode_combo)
 
-        # Hotkey display (read-only for now — configurable hotkey capture is v2)
-        hotkey_label = QLabel("Pause/Break or F9")
-        hotkey_label.setStyleSheet("font-weight: bold;")
-        form.addRow("Trigger key:", hotkey_label)
+        # Configurable hotkey — parsed by whispr.hotkey.parse_hotkey at startup.
+        self._hotkey_edit = QLineEdit(self._config.get("hotkey") or "pause")
+        self._hotkey_edit.setPlaceholderText("pause")
+        self._hotkey_edit.textChanged.connect(self._validate_hotkey)
+        form.addRow("Trigger key:", self._hotkey_edit)
+
+        # Live validation status — turns red on an unparseable combo so the
+        # user gets feedback before clicking OK and falling back to "pause".
+        self._hotkey_status = QLabel("")
+        self._hotkey_status.setStyleSheet("color: #777; font-size: 11px;")
+        form.addRow("", self._hotkey_status)
+        self._validate_hotkey(self._hotkey_edit.text())
 
         note = QLabel(
-            "Custom hotkey binding will be available in a future update.\n"
-            "For now, use Pause/Break or F9."
+            "Examples: pause, f9, ctrl+shift+space, ctrl+alt+v.\n"
+            "Modifiers: ctrl, shift, alt, cmd (also super/win/meta).\n"
+            "Unparseable values fall back to Pause."
         )
         note.setStyleSheet("color: #777; font-size: 11px;")
         form.addRow("", note)
 
         return widget
+
+    def _validate_hotkey(self, text: str) -> None:
+        """Live-validate the hotkey edit and update the status label."""
+        spec = (text or "").strip()
+        if not spec:
+            self._hotkey_status.setText("")
+            return
+        if parse_hotkey(spec) is not None:
+            self._hotkey_status.setStyleSheet("color: #2E7D32; font-size: 11px;")
+            self._hotkey_status.setText(f"✓ “{spec}” parses cleanly")
+        else:
+            self._hotkey_status.setStyleSheet("color: #C62828; font-size: 11px;")
+            self._hotkey_status.setText(
+                f"⚠ “{spec}” won’t parse — will fall back to Pause"
+            )
 
     def _build_features_tab(self) -> QWidget:
         widget = QWidget()
@@ -323,6 +348,7 @@ class SettingsDialog(QDialog):
         self._config["clipboard_threshold_chars"] = self._clipboard_spin.value()
         self._config["audio_device"] = self._device_combo.currentData()
         self._config["hotkey_mode"] = self._mode_combo.currentText()
+        self._config["hotkey"] = self._hotkey_edit.text().strip() or "pause"
         self._config["vocabulary_profile"] = self._profile_combo.currentData()
 
         self._config["postprocessing"]["punctuation_commands"] = self._pp_punctuation.isChecked()

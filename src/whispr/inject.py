@@ -25,13 +25,20 @@ _SPECIAL_KEYS = {
 
 
 def detect_display_server() -> str:
+    """Detect which display server to drive for input injection.
+
+    Prefers x11 whenever DISPLAY is set, even on a Wayland session — under
+    XWayland the app we're injecting into is an X11 client, and xdotool works
+    while ydotool would require root for /dev/uinput. Only commit to wayland
+    when there is genuinely no X path available.
+    """
+    if os.environ.get("DISPLAY"):
+        return "x11"
+    if os.environ.get("WAYLAND_DISPLAY"):
+        return "wayland"
     session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
     if session_type in ("x11", "wayland"):
         return session_type
-    if os.environ.get("WAYLAND_DISPLAY"):
-        return "wayland"
-    if os.environ.get("DISPLAY"):
-        return "x11"
     return "unknown"
 
 
@@ -240,7 +247,12 @@ def _clipboard_paste_x11(text: str) -> bool:
             timeout=5,
         )
         time.sleep(0.02)
-        _xdotool_key("ctrl+v")
+        # _xdotool_key catches its own subprocess errors and returns False
+        # rather than raising; honor that so callers know whether the paste
+        # actually landed (the finally below still runs either way).
+        if not _xdotool_key("ctrl+v"):
+            logger.error("Clipboard paste (X11) failed: ctrl+v keystroke did not send")
+            return False
         logger.info("Injected %d chars via clipboard paste (X11)", len(text))
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
@@ -296,15 +308,36 @@ def send_key_combo(combo: str, method: str = "auto") -> bool:
 
 
 def send_backspace(count: int = 1, method: str = "auto") -> bool:
-    """Send Backspace key presses."""
+    """Send N Backspace key presses.
+
+    Uses xdotool's --repeat so a 300-char delete is one subprocess invocation
+    instead of 300. The --delay 0 keeps it fast; some apps drop events at
+    full speed, so 5ms is a tolerable upper bound.
+    """
+    if count <= 0:
+        return True
     if method == "auto":
         method = detect_display_server()
     time.sleep(PRE_INJECT_DELAY_S)
-    for _ in range(count):
-        if method == "x11":
-            if not _xdotool_key("BackSpace"):
+    if method == "x11":
+        try:
+            subprocess.run(
+                ["xdotool", "key", "--clearmodifiers",
+                 "--repeat", str(count), "--delay", "5", "BackSpace"],
+                check=True,
+                timeout=max(5, count // 50),
+            )
+            return True
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            logger.error("xdotool BackSpace x%d failed: %s", count, e)
+            return False
+    if method == "wayland":
+        # Wayland path falls back to per-press; ydotool doesn't have --repeat
+        for _ in range(count):
+            if not _ydotool_key_combo("backspace"):
                 return False
-    return True
+        return True
+    return False
 
 
 def send_delete_word(method: str = "auto") -> bool:
@@ -342,12 +375,35 @@ def _ydotool_type(text: str) -> bool:
 
 
 def _ydotool_key_combo(combo: str) -> bool:
-    """Send a key combo via ydotool. Translates 'ctrl+z' to ydotool keycodes."""
-    # ydotool uses raw evdev keycodes — this is a simplified mapping
+    """Send a key combo via ydotool. Translates names to evdev keycodes.
+
+    The keymap below mirrors every action command in postprocess.ACTION_COMMANDS
+    plus the common modifier+letter combos. Names are matched case-insensitively
+    (callers split on '+' and lower-case the parts). Add entries here when new
+    action commands are introduced — silently dropping a combo means the
+    Wayland injection path no-ops without telling the user.
+    """
+    # ydotool uses raw evdev keycodes — see /usr/include/linux/input-event-codes.h
     _KEYMAP = {
+        # modifiers
         "ctrl": "29", "shift": "42", "alt": "56", "super": "125",
-        "a": "30", "b": "48", "c": "46", "i": "23", "s": "31",
-        "v": "47", "x": "45", "z": "52",
+        # letters
+        "a": "30", "b": "48", "c": "46", "d": "32", "e": "18", "f": "33",
+        "g": "34", "h": "35", "i": "23", "j": "36", "k": "37", "l": "38",
+        "m": "50", "n": "49", "o": "24", "p": "25", "q": "16", "r": "19",
+        "s": "31", "t": "20", "u": "22", "v": "47", "w": "17", "x": "45",
+        "y": "21", "z": "44",
+        # editing / navigation — needed by action commands
+        "home": "102", "end": "107",
+        "prior": "104", "pageup": "104",
+        "next": "109", "pagedown": "109",
+        "backspace": "14", "delete": "111",
+        "tab": "15", "enter": "28", "return": "28", "escape": "1", "esc": "1",
+        "left": "105", "right": "106", "up": "103", "down": "108",
+        # function keys
+        "f1": "59", "f2": "60", "f3": "61", "f4": "62", "f5": "63",
+        "f6": "64", "f7": "65", "f8": "66", "f9": "67", "f10": "68",
+        "f11": "87", "f12": "88",
     }
     if not _check_tool("ydotool"):
         return False
@@ -388,7 +444,12 @@ def _clipboard_paste_wayland(text: str) -> bool:
     try:
         subprocess.run(["wl-copy", "--", text], check=True, timeout=5)
         time.sleep(0.02)
-        _ydotool_key_combo("ctrl+v")
+        # _ydotool_key_combo swallows its subprocess errors and returns False;
+        # propagate that to the caller so a failed paste doesn't masquerade as
+        # success (the finally below still restores the clipboard either way).
+        if not _ydotool_key_combo("ctrl+v"):
+            logger.error("Clipboard paste (Wayland) failed: ctrl+v keystroke did not send")
+            return False
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         logger.error("Clipboard paste (Wayland) failed: %s", e)
