@@ -156,13 +156,46 @@ def _fix_whisper_spacing(text: str) -> str:
     return text
 
 
-def _check_action_commands(text: str, custom_commands: dict[str, str] | None = None) -> str | None:
-    """Check if the entire utterance is an action command.
+# Filler / politeness tokens that may surround an action command in natural
+# speech ("scratch that please", "uh, scratch that"). Stripped during command
+# matching only — they don't affect the dictated text downstream.
+_LEADING_FILLERS = frozenset({"um", "uh", "well", "so", "okay", "ok", "please"})
+_TRAILING_FILLERS = frozenset({"please", "thanks"})
+# Multi-word trailing fillers handled separately.
+_TRAILING_MULTIWORD = ("thank you",)
 
-    Checks custom commands first (user-defined take priority),
-    then built-in action commands.
+
+def _strip_filler(text: str) -> str:
+    """Remove leading/trailing filler tokens for command matching.
+
+    Operates on the lower-cased, comma-stripped form so the caller can pass
+    in already-normalised text. Returns the inner phrase only — does not
+    modify text injected downstream.
     """
-    normalized = text.strip().lower().rstrip(".")
+    tokens = text.replace(",", " ").split()
+    while tokens and tokens[0] in _LEADING_FILLERS:
+        tokens.pop(0)
+    while tokens:
+        # Multi-word trailing match first ("thank you")
+        joined = " ".join(tokens[-2:]) if len(tokens) >= 2 else ""
+        if joined in _TRAILING_MULTIWORD:
+            tokens.pop()
+            tokens.pop()
+        elif tokens[-1] in _TRAILING_FILLERS:
+            tokens.pop()
+        else:
+            break
+    return " ".join(tokens)
+
+
+def _check_action_commands(text: str, custom_commands: dict[str, str] | None = None) -> str | None:
+    """Check if the utterance is (or wraps) an action command.
+
+    Strips common leading/trailing fillers ("uh, scratch that please" →
+    "scratch that") so natural speech still matches. Custom commands take
+    priority over built-ins.
+    """
+    normalized = _strip_filler(text.strip().lower().rstrip("."))
 
     # Custom voice commands
     if custom_commands:
@@ -281,19 +314,55 @@ def _apply_corrections(text: str, corrections: dict[str, str]) -> str:
     return text
 
 
+# Words that legitimately end with a period without terminating a sentence.
+# Capitalisation walker stays in "mid-sentence" mode when it sees one before
+# a period. Single-letter words ("e", "i") are handled separately via length,
+# so they don't need to be listed here.
+_ABBREVIATIONS = frozenset({
+    "etc", "vs", "cf", "ca",
+    "dr", "mr", "mrs", "ms", "prof", "rev", "st",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+    "mg", "kg", "lb", "oz", "ml", "fig", "vol", "ed", "pp",
+})
+
+
 def _apply_capitalisation(text: str) -> str:
-    """Capitalise first character and characters after sentence-ending punctuation."""
+    """Capitalise the first letter and the letter after each sentence boundary.
+
+    A period only counts as a sentence boundary if the preceding word is
+    *not* a likely abbreviation. Heuristic: words ≤ 2 chars (covers "e", "i",
+    "Dr", "Mr") and an explicit list of common abbreviations are treated as
+    non-terminating. Without this, "e.g. lithium" becomes "E.G. Lithium" and
+    "Dr. Smith said" becomes "Dr. Smith Said".
+    """
     if not text:
         return text
 
     result = list(text)
     capitalise_next = True
+    # Letters since the last word boundary — used to test for abbreviation
+    # when we hit a '.'
+    word: list[str] = []
 
     for i, ch in enumerate(result):
         if capitalise_next and ch.isalpha():
             result[i] = ch.upper()
             capitalise_next = False
-        elif ch in ".?!\n":
+            word = [ch.lower()]
+        elif ch.isalpha():
+            word.append(ch.lower())
+        elif ch == ".":
+            recent = "".join(word)
+            # Treat ≤2-char words and known abbreviations as non-terminating.
+            is_abbreviation = len(recent) <= 2 or recent in _ABBREVIATIONS
+            capitalise_next = not is_abbreviation
+            word = []
+        elif ch in "?!\n":
             capitalise_next = True
+            word = []
+        elif ch.isspace():
+            word = []
+        # Other punctuation (commas, parens, etc.) preserves the running word
+        # state — "e.g.," shouldn't reset word to empty mid-abbreviation.
 
     return "".join(result)

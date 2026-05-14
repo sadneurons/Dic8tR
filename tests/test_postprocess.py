@@ -116,6 +116,28 @@ class TestEditingCommands:
         result = postprocess("I want to scratch that idea", enable_capitalisation=False)
         assert "SCRATCH" not in result
 
+    # --- Filler / politeness tolerance (#7) ---
+
+    def test_action_match_strips_trailing_please(self):
+        assert postprocess("scratch that please") == "ACTION:SCRATCH_THAT"
+
+    def test_action_match_strips_leading_uh(self):
+        assert postprocess("uh scratch that") == "ACTION:SCRATCH_THAT"
+
+    def test_action_match_strips_leading_comma_uh(self):
+        # Whisper sometimes emits a comma after a discourse marker.
+        assert postprocess("uh, scratch that") == "ACTION:SCRATCH_THAT"
+
+    def test_action_match_strips_thank_you(self):
+        assert postprocess("undo thank you") == "ACTION:UNDO"
+
+    def test_action_filler_doesnt_swallow_real_words(self):
+        # "scratch that down" must NOT match the scratch-that action —
+        # filler stripping should only remove the surrounding fillers, not
+        # words in the middle that change the semantics.
+        result = postprocess("scratch that down please", enable_capitalisation=False)
+        assert "ACTION" not in result
+
 
 # --- Vocabulary corrections ---
 
@@ -226,6 +248,49 @@ class TestCapitalisation:
     def test_preserves_existing_caps(self):
         result = postprocess("the RBANS score", corrections={"": ""})
         assert "RBANS" in result
+
+    # --- Abbreviation handling (#5) ---
+
+    def test_eg_does_not_get_uppercased(self):
+        # "e.g. lithium" must stay lowercase after the periods (the dots in
+        # the abbreviation are not sentence boundaries).
+        result = postprocess("the patient was started on e.g. lithium")
+        assert "E.G." not in result
+        assert "e.g." in result
+
+    def test_ie_does_not_get_uppercased(self):
+        result = postprocess("comorbidities i.e. diabetes and hypertension")
+        assert "I.E." not in result
+        assert "i.e." in result
+
+    def test_title_dr_does_not_terminate_sentence(self):
+        # "Dr." should not cause the next word to be uppercased mid-sentence.
+        # First-letter capitalisation still applies to the leading "the".
+        result = postprocess("the patient saw dr. smith yesterday")
+        # The first char is capitalised; "smith" after "dr." is NOT.
+        assert result.startswith("The patient saw")
+        assert "dr. smith" in result.lower()
+        # No spurious mid-sentence capital after "dr."
+        assert "Dr. Smith" not in result or result == "The patient saw Dr. Smith yesterday"
+        # The specific bug: "dr. " must not trigger capitalise_next
+        assert "dr. Smith yesterday" not in result
+
+    def test_sentence_boundary_still_capitalises(self):
+        # Normal sentence boundaries (period after a regular-length word)
+        # must still cap the next word.
+        result = postprocess("the patient is well full stop the family is supportive")
+        assert "well. The family" in result
+
+    def test_decimal_number_does_not_trigger(self):
+        # "3.14" — period followed by a digit, not a letter. capitalise_next
+        # cares about the next *alpha* char so this is mostly safe, but
+        # verify no spurious uppercasing on a following word.
+        result = postprocess("the value was 3.14 mm")
+        assert "3.14" in result
+        # "mm" after "3.14 " — only triggered if "14" counted as a word ≤ 2
+        # chars. With digits filtered out of `word`, "14" doesn't count.
+        # Either way the next alpha "m" shouldn't be capitalised mid-sentence.
+        assert "3.14 mm" in result
 
 
 # --- Full pipeline ---

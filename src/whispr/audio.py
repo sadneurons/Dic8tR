@@ -3,10 +3,21 @@
 Records from the system microphone using a callback-based InputStream.
 Records at the device's native sample rate and resamples to 16 kHz mono
 float32 — the format Whisper expects.
+
+Two capture modes:
+
+  ``AudioCapture`` — push-to-talk. start() begins recording, stop() returns
+  the captured buffer.
+
+  ``ContinuousCapture`` — voice-activated continuous capture. Maintains a
+  persistent input stream and fires the on_utterance callback per detected
+  utterance, using RMS-energy VAD with a configurable end-of-speech timeout.
 """
 
+import collections
 import logging
 import threading
+from typing import Callable
 
 import numpy as np
 import sounddevice as sd
@@ -208,3 +219,195 @@ class AudioCapture:
                     "sample_rate": dev["default_samplerate"],
                 })
         return inputs
+
+
+# ── Continuous capture with voice-activated segmentation ─────────────
+
+
+class _UtteranceSegmenter:
+    """Streaming VAD-based utterance segmenter (energy-based).
+
+    Feed audio chunks via ``process_chunk``. When sustained silence after
+    speech is detected (``end_of_speech_ms``), returns the buffered utterance
+    audio. Maintains a short pre-speech lookback so the first phoneme isn't
+    clipped. Pure state machine — no I/O — so it's easy to unit-test.
+    """
+
+    def __init__(
+        self,
+        rms_threshold: float = 0.01,
+        end_of_speech_ms: int = 900,
+        min_speech_ms: int = 250,
+        max_utterance_ms: int = 30_000,
+        lookback_ms: int = 200,
+        chunk_ms: float = 23.2,
+    ) -> None:
+        self.rms_threshold = rms_threshold
+        self.end_of_speech_ms = end_of_speech_ms
+        self.min_speech_ms = min_speech_ms
+        self.max_utterance_ms = max_utterance_ms
+        self.chunk_ms = chunk_ms
+        self._lookback_size = max(1, int(round(lookback_ms / chunk_ms)))
+        self.reset()
+
+    def reset(self) -> None:
+        self._lookback: collections.deque = collections.deque(maxlen=self._lookback_size)
+        self._utterance: list[np.ndarray] = []
+        self._has_speech = False
+        self._utterance_ms = 0.0
+        self._silence_ms = 0.0
+
+    def process_chunk(self, chunk: np.ndarray) -> np.ndarray | None:
+        """Process one audio chunk. Returns the complete utterance audio
+        (native sample rate) when end-of-speech is reached, else None.
+
+        The returned array still needs resampling to 16 kHz by the caller.
+        """
+        rms = float(np.sqrt(np.mean(chunk.astype(np.float32).flatten() ** 2)))
+        is_speech = rms >= self.rms_threshold
+
+        if not self._has_speech:
+            # Pre-speech: roll a short lookback so the first phoneme isn't lost.
+            self._lookback.append(chunk)
+            if is_speech:
+                # Promote lookback into the utterance buffer.
+                self._utterance = list(self._lookback)
+                self._lookback.clear()
+                self._has_speech = True
+                self._utterance_ms = self.chunk_ms * len(self._utterance)
+                self._silence_ms = 0.0
+            return None
+
+        # In speech: every chunk goes to the utterance buffer.
+        self._utterance.append(chunk)
+        self._utterance_ms += self.chunk_ms
+        if is_speech:
+            self._silence_ms = 0.0
+        else:
+            self._silence_ms += self.chunk_ms
+
+        if self._silence_ms >= self.end_of_speech_ms:
+            return self._finalize()
+        if self._utterance_ms >= self.max_utterance_ms:
+            return self._finalize()
+        return None
+
+    def _finalize(self) -> np.ndarray | None:
+        # Speech duration = utterance length minus the trailing silence we
+        # used to detect end-of-speech. Filter out very short bursts.
+        speech_ms = self._utterance_ms - self._silence_ms
+        if speech_ms < self.min_speech_ms:
+            self.reset()
+            return None
+        audio = np.concatenate(self._utterance, axis=0).flatten()
+        self.reset()
+        return audio
+
+
+class ContinuousCapture:
+    """Voice-activated continuous audio capture.
+
+    Opens a persistent input stream and feeds chunks through an
+    ``_UtteranceSegmenter``. When a complete utterance is detected, the
+    ``on_utterance`` callback is invoked with the audio resampled to 16 kHz.
+
+    The callback runs on PortAudio's audio thread — connect it to a Qt
+    signal (or otherwise hand off immediately) to avoid blocking the stream.
+    """
+
+    def __init__(
+        self,
+        on_utterance: Callable[[np.ndarray], None],
+        device: int | None = None,
+        rms_threshold: float = 0.01,
+        end_of_speech_ms: int = 900,
+        min_speech_ms: int = 250,
+        max_utterance_ms: int = 30_000,
+        lookback_ms: int = 200,
+    ) -> None:
+        self._on_utterance = on_utterance
+        self.device = device
+
+        try:
+            dev_index = device if device is not None else sd.default.device[0]
+            dev_info = sd.query_devices(dev_index)
+            self._native_sr = int(dev_info["default_samplerate"])
+        except Exception as e:
+            logger.warning("Failed to query device %s, defaulting to 44100Hz: %s", device, e)
+            self._native_sr = 44100
+
+        chunk_ms = (BLOCKSIZE / self._native_sr) * 1000
+        self._segmenter = _UtteranceSegmenter(
+            rms_threshold=rms_threshold,
+            end_of_speech_ms=end_of_speech_ms,
+            min_speech_ms=min_speech_ms,
+            max_utterance_ms=max_utterance_ms,
+            lookback_ms=lookback_ms,
+            chunk_ms=chunk_ms,
+        )
+
+        self._stream: sd.InputStream | None = None
+        self._running = False
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._segmenter.reset()
+        self._running = True
+        try:
+            self._stream = sd.InputStream(
+                samplerate=self._native_sr,
+                channels=CHANNELS,
+                dtype=DTYPE,
+                blocksize=BLOCKSIZE,
+                device=self.device,
+                callback=self._audio_callback,
+            )
+            self._stream.start()
+            logger.info(
+                "Continuous capture started (device=%s, native_sr=%d)",
+                self.device if self.device is not None else "default",
+                self._native_sr,
+            )
+        except Exception as e:
+            self._running = False
+            self._stream = None
+            logger.error("Failed to open continuous audio stream: %s", e)
+            raise
+
+    def stop(self) -> None:
+        self._running = False
+        stream = self._stream
+        self._stream = None
+        if stream is not None:
+            try:
+                stream.abort()
+                stream.close()
+            except Exception as e:
+                logger.warning("Error closing continuous stream: %s", e)
+        self._segmenter.reset()
+        logger.info("Continuous capture stopped")
+
+    def _audio_callback(
+        self,
+        indata: np.ndarray,
+        frames: int,
+        time_info: object,
+        status: sd.CallbackFlags,
+    ) -> None:
+        if not self._running:
+            return
+        if status:
+            logger.warning("Continuous callback status: %s", status)
+        utterance = self._segmenter.process_chunk(indata.copy())
+        if utterance is None:
+            return
+        audio_16k = _resample(utterance, self._native_sr, WHISPER_SAMPLE_RATE)
+        try:
+            self._on_utterance(audio_16k)
+        except Exception:
+            logger.exception("ContinuousCapture on_utterance callback raised")

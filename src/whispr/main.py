@@ -17,7 +17,7 @@ import numpy as np
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import QApplication
 
-from whispr.audio import AudioCapture
+from whispr.audio import AudioCapture, ContinuousCapture
 from whispr.audio_feedback import play_start_sound, play_stop_sound
 from whispr.config import load_config, load_vocabulary, load_profile, build_initial_prompt, save_config
 from whispr.first_run import FirstRunWizard, model_is_cached
@@ -79,9 +79,9 @@ class WhisprApp(QObject):
         if config["postprocessing"].get("llm_cleanup", False):
             self._init_llm_cleanup()
 
-        # Continuous mode state
+        # Continuous mode state — capture object lives only while active.
         self._continuous_active = False
-        self._vad_timer: QTimer | None = None
+        self._continuous_capture: ContinuousCapture | None = None
 
         self._hotkey_listener = None
         self._last_text = ""
@@ -295,7 +295,12 @@ class WhisprApp(QObject):
 
     @pyqtSlot(str)
     def _on_transcription_done(self, raw_text: str) -> None:
-        self.tray.set_state(TrayState.IDLE)
+        # In continuous mode the mic is still open and listening for the next
+        # utterance — return to LISTENING so the tray icon reflects that
+        # rather than briefly flashing IDLE between every utterance.
+        self.tray.set_state(
+            TrayState.LISTENING if self._continuous_active else TrayState.IDLE
+        )
 
         if not raw_text:
             logger.info("Empty transcription, skipping")
@@ -402,66 +407,55 @@ class WhisprApp(QObject):
     # ── Continuous / VAD mode ─────────────────────────────────────────
 
     def start_continuous_mode(self) -> None:
-        """Start continuous listening with VAD-based segmentation."""
+        """Start voice-activated continuous listening.
+
+        Opens a persistent input stream. The ContinuousCapture's segmenter
+        emits an utterance every time end-of-speech is detected; the same
+        transcription pipeline as push-to-talk handles each one.
+        """
         if self._continuous_active:
             return
 
+        try:
+            self._continuous_capture = ContinuousCapture(
+                on_utterance=self._on_continuous_utterance,
+                device=self.config.get("audio_device"),
+            )
+            self._continuous_capture.start()
+        except Exception as e:
+            logger.error("Failed to start continuous mode: %s", e)
+            self._continuous_capture = None
+            self.tray.show_notification(
+                "Whispr", "Continuous mode unavailable — audio device error", 5000
+            )
+            return
+
         self._continuous_active = True
-        self._continuous_failures = 0
-        logger.info("Continuous mode started")
+        self.tray.set_state(TrayState.LISTENING)
         self.tray.show_notification("Whispr", "Continuous listening active", 2000)
-        self._continuous_record_cycle()
+        logger.info("Continuous mode started (VAD-based segmentation)")
 
     def stop_continuous_mode(self) -> None:
         """Stop continuous listening."""
         self._continuous_active = False
-        if self.audio.is_recording:
-            audio = self.audio.stop()
-            if len(audio) > 0:
-                self.recording_stopped.emit(audio)
+        if self._continuous_capture is not None:
+            try:
+                self._continuous_capture.stop()
+            except Exception as e:
+                logger.warning("Error stopping continuous capture: %s", e)
+            self._continuous_capture = None
         self.tray.set_state(TrayState.IDLE)
         logger.info("Continuous mode stopped")
 
-    def _continuous_record_cycle(self) -> None:
-        """Record a segment, transcribe, then start the next segment."""
-        if not self._continuous_active:
-            return
+    def _on_continuous_utterance(self, audio: np.ndarray) -> None:
+        """Callback fired by ContinuousCapture per detected utterance.
 
-        try:
-            self.audio.start()
-            self.tray.set_state(TrayState.LISTENING)
-            self._continuous_failures = 0
-        except Exception as e:
-            self._continuous_failures += 1
-            if self._continuous_failures >= 3:
-                logger.error("Continuous mode: %d consecutive failures, stopping. Last error: %s",
-                             self._continuous_failures, e)
-                self._continuous_active = False
-                self.tray.set_state(TrayState.IDLE)
-                self.tray.show_notification(
-                    "Whispr", "Continuous mode stopped — audio device unavailable", 5000)
-                return
-            # Retry with backoff
-            delay = self._continuous_failures * 2000
-            logger.warning("Continuous mode audio failed, retrying in %dms: %s", delay, e)
-            QTimer.singleShot(delay, self._continuous_record_cycle)
-            return
-
-        # Record for 5 seconds then process (VAD will trim silence)
-        QTimer.singleShot(5000, self._continuous_segment_done)
-
-    def _continuous_segment_done(self) -> None:
-        """Handle end of a continuous mode recording segment."""
-        if not self._continuous_active:
-            return
-
-        audio = self.audio.stop()
+        Runs on PortAudio's audio thread — we hand off immediately via a Qt
+        queued-connection signal so the audio callback doesn't block on
+        transcription.
+        """
         if len(audio) > 0:
             self.recording_stopped.emit(audio)
-
-        # Start next segment after a short gap
-        if self._continuous_active:
-            QTimer.singleShot(500, self._continuous_record_cycle)
 
     # ── Profile switching ─────────────────────────────────────────────
 
